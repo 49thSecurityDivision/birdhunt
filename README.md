@@ -8,6 +8,6 @@
 | Lansina Diakite          | Router        | O             |
 | Tyler Eisenbraun         | Linux         | O             |
 | Matthew Hampton          | Windows       | cthulu        |
-| Hunter Korff (Team Lead) | Windows       | O             |
+| Hunter Korff (Team Lead) | Windows       | Viking        |
 | Henry Shearer            | Windows       | kerberos      |
 | Cameron Taylor           | Linux         | O             |
