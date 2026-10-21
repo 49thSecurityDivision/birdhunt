@@ -248,10 +248,30 @@ if ($rdp -or $all) {
 # Optional: password policy (-pswd)  [NEW EMPTY BUCKET]
 #####################################################################
 if ($pswd -or $all) {
-    Write-Host "\nPassword policy changes: [-pswd]" -ForegroundColor Yellow
-    
-    Invoke-Step 'Enforce password complexity' {
-    }
+    if ($isDC) {
+        Invoke-Step 'AD-DC password policy' {
+            $pp = @{
+                Identity                    = (Get-ADDomain).DNSRoot
+                ComplexityEnabled           = $true
+                MinPasswordLength           = 12
+                PasswordHistoryCount        = 24
+                ReversibleEncryptionEnabled = $false
+                LockoutThreshold            = 10
+                LockoutObservationWindow    = '00:15:00'
+                LockoutDuration             = '00:15:00'
+            }
+            Set-ADDefaultDomainPasswordPolicy @pp
+        }
+    } else {
+        Invoke-Step 'Local password policy' {
+            net accounts /minpwlen:12 /lockoutthreshold:10 /lockoutduration:15 /lockoutwindow:15 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'net accounts failed' }
+            secedit /export /cfg $secInf /areas SECURITYPOLICY | Out-Null
+            (Get-Content $secInf) -replace 'PasswordComplexity\s*=\s*0','PasswordComplexity = 1' | Set-Content $secInf -Encoding Unicode
+            secedit /configure /db $secDb /cfg $secInf /areas SECURITYPOLICY | Out-Null
+            Remove-Item $secInf,$secDb -ErrorAction SilentlyContinue
+        }
+    }    
 }
 
 #####################################################################
