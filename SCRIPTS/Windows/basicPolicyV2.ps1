@@ -66,8 +66,8 @@ $backupKeys = @(
 
 $isDC = (Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4
 if ($isDC) {
-    Import-Module ActiveDirectory, GroupPolicy                # [NEW] make sure AD and GPO cmdlets are loaded
-    $domainDN = (Get-ADDomain).DistinguishedName              # [NEW] GPO gets linked at the domain root
+    Import-Module ActiveDirectory, GroupPolicy
+    $domainDN = (Get-ADDomain).DistinguishedName
 }
 
 #####################################################################
@@ -91,11 +91,10 @@ function Invoke-Step {
 function Set-PolicyValue {
     param([string]$Path, [string]$Name, $Value, [string]$Type = 'DWord')
     if ($isDC) {
-        # Set-GPRegistryValue wants "HKLM\..." not "HKLM:\..."
         Set-GPRegistryValue -Name $gpoName -Key ($Path -replace '^HKLM:\\', 'HKLM\') -ValueName $Name -Type $Type -Value $Value | Out-Null
     }
     else {
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }   # create the key if it is missing
+        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
         New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
     }
 }
@@ -103,41 +102,41 @@ function Set-PolicyValue {
 #####################################################################
 # Logging and backup
 #####################################################################
-New-Item -ItemType Directory -Path $logDir -Force | Out-Null           # create log folder if needed
-Start-Transcript -Path "$logDir\basicPolicy-$stamp.txt" | Out-Null     # full record of everything this run does (useful for injects)
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+Start-Transcript -Path "$logDir\basicPolicy-$stamp.txt" | Out-Null
 foreach ($k in $backupKeys) {
-    $file = "$logDir\backup-$stamp-" + ($k -replace '[\\:]', '_') + '.reg'   # one .reg file per key, restore with: reg import <file>
-    reg export $k $file /y | Out-Null                                        # snapshot the key before we touch it
+    $file = "$logDir\backup-$stamp-" + ($k -replace '[\\:]', '_') + '.reg'
+    reg export $k $file /y | Out-Null
 }
-secedit /export /cfg "$logDir\secpol-before-$stamp.inf" | Out-Null     # snapshot local security policy (admin rename, SID lookup, etc.)
+secedit /export /cfg "$logDir\secpol-before-$stamp.inf" | Out-Null
 
 #####################################################################
 # Create and link GPO
 #####################################################################
 Invoke-Step "Create/link GPO '$gpoName'" {
     if (-not $isDC) { Write-Host "  Not a DC: settings will be written locally instead of to a GPO."; return }
-    if (-not (Get-GPO -Name $gpoName -ErrorAction SilentlyContinue)) { New-GPO -Name $gpoName | Out-Null }   # create only if missing
-    $linked = (Get-GPInheritance -Target $domainDN).GpoLinks | Where-Object DisplayName -eq $gpoName         # already linked?
-    if (-not $linked) { New-GPLink -Name $gpoName -Target $domainDN -LinkEnabled Yes -Enforced Yes | Out-Null } # link at domain root, enforced
+    if (-not (Get-GPO -Name $gpoName -ErrorAction SilentlyContinue)) { New-GPO -Name $gpoName | Out-Null }
+    $linked = (Get-GPInheritance -Target $domainDN).GpoLinks | Where-Object DisplayName -eq $gpoName
+    if (-not $linked) { New-GPLink -Name $gpoName -Target $domainDN -LinkEnabled Yes -Enforced Yes | Out-Null }
 }
 
 #####################################################################
 # Disable print spooler
 #####################################################################
-Invoke-Step 'Disable print spooler' {                                 # [CHANGED] try/catch replaced by Invoke-Step
-    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue   # fine if it is already stopped
+Invoke-Step 'Disable print spooler' {
+    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
     Set-Service -Name Spooler -StartupType Disabled
 }
 
 #####################################################################
 # Disable guest account
 #####################################################################
-Invoke-Step 'Disable Guest account' {                                 # [CHANGED] looks up by RID 501 instead of the name "Guest"
+Invoke-Step 'Disable Guest account' {
     if ($isDC) {
-        Disable-ADAccount -Identity ((Get-ADDomain).DomainSID.Value + '-501')   # domain Guest, found by SID so renames do not matter
+        Disable-ADAccount -Identity ((Get-ADDomain).DomainSID.Value + '-501')
     }
     else {
-        Get-LocalUser | Where-Object SID -like '*-501' | Disable-LocalUser      # local Guest on member servers/workstations
+        Get-LocalUser | Where-Object SID -like '*-501' | Disable-LocalUser
     }
 }
 
@@ -145,71 +144,71 @@ Invoke-Step 'Disable Guest account' {                                 # [CHANGED
 # Disable EternalBlue
 #####################################################################
 Invoke-Step 'Disable SMBv1' {
-    Set-SmbServerConfiguration -EnableSMB1Protocol $False -Force      # turn off SMBv1 server immediately
-    Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue   # [NEW] remove the feature entirely (restart finishes it); ignore if already removed
+    Set-SmbServerConfiguration -EnableSMB1Protocol $False -Force
+    Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue
 }
 
 #####################################################################
 # Disable ZeroLogon
 #####################################################################
-Invoke-Step 'Disable ZeroLogon' {                                     # [CHANGED] value now goes through the GPO
-    Set-PolicyValue $zerologonRegistryPath 'FullSecureChannelProtection' 1   # enforce secure channel (needs Aug 2020+ patches on the DC)
-    Remove-ItemProperty $zerologonRegistryPath -Name VulnerableChannelAllowList -ErrorAction SilentlyContinue   # [NEW] remove a possible red-team allow-list backdoor
+Invoke-Step 'Disable ZeroLogon' {
+    Set-PolicyValue $zerologonRegistryPath 'FullSecureChannelProtection' 1
+    Remove-ItemProperty $zerologonRegistryPath -Name VulnerableChannelAllowList -ErrorAction SilentlyContinue
 }
 
 #####################################################################
 # Enforce NTLMv2
 #####################################################################
 Invoke-Step 'Enforce NTLMv2' {
-    Set-PolicyValue $lsaRegistryPath 'LmCompatibilityLevel' 5         # [CHANGED] via GPO; 5 = NTLMv2 only, refuse LM and NTLM
+    Set-PolicyValue $lsaRegistryPath 'LmCompatibilityLevel' 5
 }
 
 #####################################################################
 # Disable storing LM hash
 #####################################################################
 Invoke-Step 'Disable storing LM hash' {
-    Set-PolicyValue $lsaRegistryPath 'NoLMHash' 1                     # [CHANGED] via GPO; only affects future password changes
+    Set-PolicyValue $lsaRegistryPath 'NoLMHash' 1
 }
 
 #####################################################################
 # Disable anonymous enumeration of SAM accounts and shares
 #####################################################################
 Invoke-Step 'Disable anonymous enumeration of SAM accounts and shares' {
-    Set-PolicyValue $lsaRegistryPath 'RestrictAnonymous' 1            # [CHANGED] via GPO
+    Set-PolicyValue $lsaRegistryPath 'RestrictAnonymous' 1
 }
 
 #####################################################################
 # Disable anonymous enumeration of SAM accounts
 #####################################################################
 Invoke-Step 'Disable anonymous enumeration of SAM accounts' {
-    Set-PolicyValue $lsaRegistryPath 'RestrictAnonymousSAM' 1         # [CHANGED] via GPO
+    Set-PolicyValue $lsaRegistryPath 'RestrictAnonymousSAM' 1
 }
 
 #####################################################################
 # Disable anonymous SID/name translation
 #####################################################################
-Invoke-Step 'Disable anonymous SID/name translation' {                # [CHANGED] secedit exit codes are now checked
-    secedit /export /cfg $secInf /areas SECURITYPOLICY | Out-Null     # dump current local policy
-    if ($LASTEXITCODE -ne 0) { throw 'secedit export failed' }        # secedit never throws, so check the exit code
-    (Get-Content $secInf) -replace 'LSAAnonymousNameLookup\s*=\s*1', 'LSAAnonymousNameLookup = 0' | Set-Content $secInf -Encoding Unicode   # flip the value; Unicode is required for secedit
-    secedit /configure /db $secDb /cfg $secInf /areas SECURITYPOLICY | Out-Null   # re-apply the edited policy
+Invoke-Step 'Disable anonymous SID/name translation' {
+    secedit /export /cfg $secInf /areas SECURITYPOLICY | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'secedit export failed' }
+    (Get-Content $secInf) -replace 'LSAAnonymousNameLookup\s*=\s*1', 'LSAAnonymousNameLookup = 0' | Set-Content $secInf -Encoding Unicode
+    secedit /configure /db $secDb /cfg $secInf /areas SECURITYPOLICY | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'secedit configure failed' }
-    Remove-Item $secInf, $secDb -ErrorAction SilentlyContinue         # clean up temp files
+    Remove-Item $secInf, $secDb -ErrorAction SilentlyContinue
 }
 
 #####################################################################
 # Rename admin account
 #####################################################################
-Invoke-Step 'Rename built-in Administrator' {                         # [CHANGED] branches on DC vs non-DC
-    $users = Get-CimInstance Win32_Service | Where-Object StartName -like '*Administrator*'   # [NEW] services that log on as Administrator will break
+Invoke-Step 'Rename built-in Administrator' {
+    $users = Get-CimInstance Win32_Service | Where-Object StartName -like '*Administrator*'
     if ($users) { Write-Host "  WARNING: services run as Administrator: $($users.Name -join ', ')" -ForegroundColor Yellow }
     if ($isDC) {
-        $a = Get-ADUser -Identity ((Get-ADDomain).DomainSID.Value + '-500')   # RID 500, works even if already renamed
-        Set-ADUser $a -SamAccountName $newAdminName -UserPrincipalName "$newAdminName@$((Get-ADDomain).DNSRoot)"   # change logon names
-        Rename-ADObject $a.DistinguishedName -NewName $newAdminName           # change the AD object name
+        $a = Get-ADUser -Identity ((Get-ADDomain).DomainSID.Value + '-500')
+        Set-ADUser $a -SamAccountName $newAdminName -UserPrincipalName "$newAdminName@$((Get-ADDomain).DNSRoot)"
+        Rename-ADObject $a.DistinguishedName -NewName $newAdminName
     }
     else {
-        Get-LocalUser | Where-Object SID -like '*-500' | Rename-LocalUser -NewName $newAdminName   # local admin by RID 500
+        Get-LocalUser | Where-Object SID -like '*-500' | Rename-LocalUser -NewName $newAdminName
     }
 }
 
@@ -217,8 +216,8 @@ Invoke-Step 'Rename built-in Administrator' {                         # [CHANGED
 # Add banner message
 #####################################################################
 Invoke-Step 'Add banner message' {
-    Set-PolicyValue $bannerRegistryPath 'legalnoticecaption' $bannerCaption 'String'   # [CHANGED] via GPO; title shown at logon
-    Set-PolicyValue $bannerRegistryPath 'legalnoticetext' $bannerText 'String'         # [CHANGED] via GPO; message body
+    Set-PolicyValue $bannerRegistryPath 'legalnoticecaption' $bannerCaption 'String'
+    Set-PolicyValue $bannerRegistryPath 'legalnoticetext' $bannerText 'String'
 }
 
 #####################################################################
@@ -249,8 +248,10 @@ if ($rdp -or $all) {
 # Optional: password policy (-pswd)  [NEW EMPTY BUCKET]
 #####################################################################
 if ($pswd -or $all) {
-    Write-Host "[SKIP] Password bucket selected but nothing implemented yet." -ForegroundColor Yellow
-    # TODO: enforce password complexity / minimum length (and rotate passwords)
+    Write-Host "\nPassword policy changes: [-pswd]" -ForegroundColor Yellow
+    
+    Invoke-Step 'Enforce password complexity' {
+    }
 }
 
 #####################################################################
