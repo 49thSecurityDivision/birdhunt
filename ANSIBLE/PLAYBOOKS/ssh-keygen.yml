@@ -3,9 +3,12 @@
 
 ## 1. Get on jump box
 ## 2. Install Crypto collection : ansible-galaxy collection install community.crypto
-## Run command (e.g) : ansible-playbook -i Inventory.yml PLAYBOOKS/linux-ssh-keys.yaml -e "passphrase=WeLoveLunarMining!"
-## Run Command : ansible linux -i Inventory.yml -m shell -a "sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && systemctl reload ssh" -b
-## Run Command (Just for Balrog since it runs Alpine) : ansible balrog -i Inventory.yml -m shell -a "sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && rc-service sshd reload" -b
+## 3. Run command (e.g) : ansible-playbook -i Inventory.yml PLAYBOOKS/linux-ssh-keys.yaml -e "passphrase=WeLoveLunarMining!"
+## 4. Run Command (Disables password auth)  : ansible linux -i Inventory.yml -m shell -a "sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && systemctl reload ssh" -b
+## 5. Run Command (Same as above but just for Balrog since it runs Alpine) : ansible balrog -i Inventory.yml -m shell -a "sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && rc-service sshd reload" -b
+## 6. Start local ssh agent : eval "$(ssh-agent -s)"
+## 7. Unlock keys locally (per machine) : ssh-add ~/.ssh/id_ed25519_balrogssh-add ~/.ssh/id_ed25519_donutssh-add ~/.ssh/id_ed25519_brassknuckels
+## 8. ssh root@...
 
 ## End goal: Can just remote in from Jump box, remote nodes match their public keys with its private. 
 
