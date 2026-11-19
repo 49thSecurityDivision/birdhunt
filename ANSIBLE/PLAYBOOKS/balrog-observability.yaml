@@ -1,0 +1,140 @@
+---
+- name: Deploy Baselines, Observability Scripts, and Cron on Balrog
+  hosts: balrog
+  remote_user: root
+
+  tasks:
+    # 1. Baseline Snapshots for DNS, DHCP, and Network Configs
+    - name: Back up known-good dnsmasq.conf and hosts files (only if backup does not exist)
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        force: false
+        mode: '0644'
+      loop:
+        - { src: '/etc/dnsmasq.conf', dest: '/root/dnsmasq.conf.good' }
+        - { src: '/etc/hosts', dest: '/root/hosts.good' }
+
+    - name: Generate SHA-256 baseline hashes and initialize DHCP lease baseline
+      ansible.builtin.shell: |
+        sha256sum /etc/dnsmasq.conf /etc/hosts /etc/network/interfaces /etc/apk/repositories > /root/dns_hashes.txt
+        touch /var/lib/misc/dnsmasq.leases
+        awk '{print $2, $3, $4}' /var/lib/misc/dnsmasq.leases | sort > /root/dhcp_leases.baseline
+      args:
+        creates: /root/dns_hashes.txt
+
+    # 2. Deploy All 5 Observability & Auto-Heal Scripts (POSIX /bin/sh)
+    - name: Deploy Session Monitoring Script
+      ansible.builtin.copy:
+        dest: /root/session_monitoring.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          ACTIVE_SESSIONS=$(who | wc -l)
+          if [ "$ACTIVE_SESSIONS" -gt 1 ]; then
+              logger "SECURITY ALERT: Multiple active interactive sessions detected on balrog!"
+              who | logger
+          fi
+
+    - name: Deploy Inbound detection Script
+      ansible.builtin.copy:
+        dest: /root/inbound_detection.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          # Whitelist ONLY balrog's core routing/admin ports: 22 (SSH), 53/67 (dnsmasq), 123/46188 (ntpd)
+          ROGUE_PORTS=$(netstat -tulpn | grep -E '(^tcp.*LISTEN|^udp)' | grep -vE '(:22 |:53 |:67 |:123 |:46188 )')
+          if [ -n "$ROGUE_PORTS" ]; then
+              logger "SECURITY ALERT: Unauthorized Inbound listener detected on balrog!"
+              logger "$ROGUE_PORTS"
+          fi
+
+    - name: Deploy Egress detections Script
+      ansible.builtin.copy:
+        dest: /root/egress_detections.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          # Whitelist internal LAN (192.168.220.x), mirror/scoring ranges (10.100.x.x), and loopback
+          ROGUE_EGRESS=$(netstat -tunpa | grep ESTABLISHED | grep -vE '192\.168\.220\.|10\.100\.|127\.0\.0\.1')
+          if [ -n "$ROGUE_EGRESS" ]; then
+              logger "EGRESS ALERT: Unauthorized outbound connection detected on balrog!"
+              logger "$ROGUE_EGRESS"
+          fi
+
+    - name: Deploy DNS Protection & Auto-Heal Script
+      ansible.builtin.copy:
+        dest: /root/dns_protection.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          if ! pgrep -x "dnsmasq" > /dev/null; then
+              logger "SECURITY ALERT: dnsmasq service was stopped on balrog! Auto-restarting..."
+              rc-service dnsmasq start
+          fi
+
+          if ! sha256sum -c /root/dns_hashes.txt --quiet 2>/dev/null; then
+              logger "SECURITY ALERT: DNS/Network config tampering detected on balrog! Restoring clean configs..."
+              cp /root/dnsmasq.conf.good /etc/dnsmasq.conf
+              cp /root/hosts.good /etc/hosts
+              rc-service dnsmasq restart
+              sha256sum /etc/dnsmasq.conf /etc/hosts /etc/network/interfaces /etc/apk/repositories > /root/dns_hashes.txt
+          fi
+
+    - name: Deploy DHCP Lease Monitor Script
+      ansible.builtin.copy:
+        dest: /root/dhcp_detection.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          LEASE_FILE="/var/lib/misc/dnsmasq.leases"
+          BASELINE="/root/dhcp_leases.baseline"
+          CURRENT="/tmp/dhcp_leases.current"
+
+          if [ -f "$LEASE_FILE" ]; then
+              awk '{print $2, $3, $4}' "$LEASE_FILE" | sort > "$CURRENT"
+              NEW_LEASES=$(grep -vxFf "$BASELINE" "$CURRENT" 2>/dev/null)
+              if [ -n "$NEW_LEASES" ]; then
+                  logger "SECURITY ALERT: New DHCP lease assigned on balrog: $NEW_LEASES"
+                  cp "$CURRENT" "$BASELINE"
+              fi
+          fi
+
+    # 3. Schedule All 5 Cron Jobs & Enable OpenRC crond
+    - name: Schedule Session Monitoring in Cron
+      ansible.builtin.cron:
+        name: "Run Session Monitoring"
+        minute: "*"
+        job: "/root/session_monitoring.sh"
+
+    - name: Schedule Inbound detection in Cron
+      ansible.builtin.cron:
+        name: "Run Inbound detection"
+        minute: "*"
+        job: "/root/inbound_detection.sh"
+
+    - name: Schedule Egress detections in Cron
+      ansible.builtin.cron:
+        name: "Run Egress detections"
+        minute: "*"
+        job: "/root/egress_detections.sh"
+
+    - name: Schedule DNS Protection in Cron
+      ansible.builtin.cron:
+        name: "Run DNS Protection"
+        minute: "*"
+        job: "/root/dns_protection.sh"
+
+    - name: Schedule DHCP Detection in Cron
+      ansible.builtin.cron:
+        name: "Run DHCP Detection"
+        minute: "*"
+        job: "/root/dhcp_detection.sh"
+
+    - name: Ensure crond and dnsmasq are enabled and started via OpenRC
+      ansible.builtin.shell: |
+        rc-update add crond default
+        rc-update add dnsmasq default
+        rc-service crond restart
+      changed_when: false
