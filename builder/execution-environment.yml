@@ -1,0 +1,15 @@
+---
+version: 3
+
+images:
+  base_image:
+    name: quay.io/ansible/ansible-runner:latest
+
+dependencies:
+  galaxy: requirements.yml
+  python: requirements.txt
+  system: bindep.txt
+
+additional_build_steps:
+  append_final:
+    - RUN dnf install -y graphviz iproute openssh-clients sshpass && dnf clean all

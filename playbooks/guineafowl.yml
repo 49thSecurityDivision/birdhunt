@@ -1,0 +1,384 @@
+---
+# =============================================================================
+# OFFLINE-CAPABLE WAZUH DEPLOYMENT
+#
+# Agents have NO internet. All artifacts are pulled onto the jumpbox once
+# (Play 2), then pushed to each host over the existing SSH/WinRM connection
+# (Plays 3 & 4) — the agents never reach the internet.
+#
+# Play 2 downloads with force:false, so once playbooks/files/ is populated it
+# makes no network calls and the whole run works on a fully air-gapped jumpbox.
+# Populate files/ while the jumpbox has internet (during setup).
+#
+# Agent version must be <= manager version. Check the manager with
+# `/var/ossec/bin/wazuh-control info`; set wazuh_agent_version to match.
+# =============================================================================
+
+# =============================================================================
+# PLAY 1: DEPLOY WAZUH MANAGER, INDEXER & DASHBOARD ON JUMPBOX (LOCALHOST)
+# =============================================================================
+- name: Deploy Wazuh Manager Stack on Jumpbox
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    wazuh_version: "4.9"
+
+  tasks:
+    - name: Auto-detect Jumpbox IP on the 192.168.220.0/24 network
+      ansible.builtin.shell: |
+        ip -4 -o addr show | awk '/192\.168\.220\./ {split($4, a, "/"); print a[1]; exit}'
+      register: detected_ip
+      changed_when: false
+
+    - name: Set Wazuh Manager IP fact globally
+      ansible.builtin.set_fact:
+        resolved_manager_ip: "{{ wazuh_manager_ip | default((detected_ip.stdout | trim) if (detected_ip.stdout | trim | length > 0) else ansible_default_ipv4.address) }}"
+
+    - name: Display target Wazuh Manager IP
+      ansible.builtin.debug:
+        msg: "Wazuh Manager IP set to: {{ resolved_manager_ip }}"
+
+    - name: Check if Wazuh Manager is already installed and active
+      ansible.builtin.command: systemctl is-active wazuh-manager
+      register: manager_status
+      failed_when: false
+      changed_when: false
+
+    - name: Download Wazuh 4.9 All-in-One Installation Assistant
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/{{ wazuh_version }}/wazuh-install.sh"
+        dest: /tmp/wazuh-install.sh
+        mode: "0755"
+      when: manager_status.rc != 0
+
+    - name: Run Wazuh All-in-One Installer (Manager, Indexer, Dashboard)
+      ansible.builtin.command: bash /tmp/wazuh-install.sh -a -i
+      args:
+        chdir: /tmp
+      register: wazuh_install_out
+      when: manager_status.rc != 0
+
+    - name: Extract and save Wazuh Dashboard credentials to ~/BirdHunt/wazuh_credentials.txt
+      ansible.builtin.shell: |
+        tar -axf /tmp/wazuh-install-files.tar wazuh-install-files/wazuh-passwords.txt -O > "{{ playbook_dir }}/../wazuh_credentials.txt"
+        chmod 600 "{{ playbook_dir }}/../wazuh_credentials.txt"
+      when:
+        - manager_status.rc != 0
+        - wazuh_install_out is changed
+      failed_when: false
+
+    - name: Ensure Wazuh Manager service is enabled and started
+      ansible.builtin.service:
+        name: wazuh-manager
+        state: started
+        enabled: true
+
+    - name: Allow Wazuh Agent and Dashboard ports through UFW (if UFW is active)
+      ansible.builtin.shell: |
+        if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+          ufw allow 1514/tcp
+          ufw allow 1515/tcp
+          ufw allow 55000/tcp
+          ufw allow 443/tcp
+        fi
+      changed_when: false
+
+# =============================================================================
+# PLAY 2: STAGE AGENT ARTIFACTS ON THE JUMPBOX (runs on the jumpbox itself)
+#   - force:false => downloads only what's missing; skips (no network) when
+#     files are already present, so this play is a no-op on an air-gapped box.
+#   - failed_when:false => a missing optional artifact (e.g. the RPM when you
+#     have no RHEL hosts) won't abort the run. A genuinely-needed-but-missing
+#     file surfaces later, at the exact host that needs it, when the copy fails.
+# =============================================================================
+- name: Stage Wazuh agent artifacts on the jumpbox
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    wazuh_agent_version: "4.9.0-1"
+    files_dir: "{{ playbook_dir }}/files"
+
+  tasks:
+    - name: Ensure staging directory exists
+      ansible.builtin.file:
+        path: "{{ files_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Stage Wazuh agent .deb (Debian/Ubuntu, x86_64)
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_{{ wazuh_agent_version }}_amd64.deb"
+        dest: "{{ files_dir }}/wazuh-agent_{{ wazuh_agent_version }}_amd64.deb"
+        force: false
+      failed_when: false
+
+    - name: Stage Wazuh agent .rpm (RHEL/CentOS/Rocky/Fedora, x86_64)
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.x/yum/wazuh-agent-{{ wazuh_agent_version }}.x86_64.rpm"
+        dest: "{{ files_dir }}/wazuh-agent-{{ wazuh_agent_version }}.x86_64.rpm"
+        force: false
+      failed_when: false
+
+    - name: Stage Wazuh agent .msi (Windows)
+      ansible.builtin.get_url:
+        url: "https://packages.wazuh.com/4.x/windows/wazuh-agent-{{ wazuh_agent_version }}.msi"
+        dest: "{{ files_dir }}/wazuh-agent-{{ wazuh_agent_version }}.msi"
+        force: false
+      failed_when: false
+
+    - name: Stage Sysmon64.exe (Windows)
+      ansible.builtin.get_url:
+        url: "https://live.sysinternals.com/Sysmon64.exe"
+        dest: "{{ files_dir }}/Sysmon64.exe"
+        force: false
+      failed_when: false
+
+    - name: Stage Sysmon config (Windows)
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/SwiftOnSecurity/sysmon-config/master/sysmonconfig-export.xml"
+        dest: "{{ files_dir }}/sysmonconfig.xml"
+        force: false
+      failed_when: false
+
+# =============================================================================
+# PLAY 3: DEPLOY WAZUH AGENT TO LINUX HOSTS (offline, copied from jumpbox)
+# =============================================================================
+- name: Deploy Wazuh Agent to Linux Hosts
+  hosts: linux
+  remote_user: root
+  gather_facts: true
+  vars:
+    wazuh_manager_ip: "{{ hostvars['localhost']['resolved_manager_ip'] }}"
+    wazuh_agent_version: "4.9.0-1"
+    files_dir: "{{ playbook_dir }}/files"
+
+  handlers:
+    - name: restart wazuh-agent
+      ansible.builtin.service:
+        name: wazuh-agent
+        state: restarted
+
+  tasks:
+    - name: Check whether the Wazuh agent is already installed
+      ansible.builtin.stat:
+        path: /var/ossec/bin/wazuh-control
+      register: ossec_bin
+
+    - name: Copy Wazuh agent .deb to host (Debian/Ubuntu)
+      ansible.builtin.copy:
+        src: "{{ files_dir }}/wazuh-agent_{{ wazuh_agent_version }}_amd64.deb"
+        dest: /tmp/wazuh-agent.deb
+      when:
+        - ansible_os_family == "Debian"
+        - not ossec_bin.stat.exists
+
+    - name: Install Wazuh agent from local .deb (Debian/Ubuntu)
+      ansible.builtin.apt:
+        deb: /tmp/wazuh-agent.deb
+      when:
+        - ansible_os_family == "Debian"
+        - not ossec_bin.stat.exists
+      notify: restart wazuh-agent
+
+    - name: Copy Wazuh agent .rpm to host (RHEL/CentOS/Rocky/Fedora)
+      ansible.builtin.copy:
+        src: "{{ files_dir }}/wazuh-agent-{{ wazuh_agent_version }}.x86_64.rpm"
+        dest: /tmp/wazuh-agent.rpm
+      when:
+        - ansible_os_family == "RedHat"
+        - not ossec_bin.stat.exists
+
+    - name: Install Wazuh agent from local .rpm (RHEL/CentOS/Rocky/Fedora)
+      ansible.builtin.dnf:
+        name: /tmp/wazuh-agent.rpm
+        disable_gpg_check: true
+      when:
+        - ansible_os_family == "RedHat"
+        - not ossec_bin.stat.exists
+      notify: restart wazuh-agent
+
+    - name: Configure Linux ossec.conf with Manager IP and Real-Time FIM
+      ansible.builtin.copy:
+        dest: /var/ossec/etc/ossec.conf
+        owner: root
+        group: wazuh
+        mode: "0640"
+        content: |
+          <ossec_config>
+            <client>
+              <server>
+                <address>{{ wazuh_manager_ip }}</address>
+                <port>1514</port>
+                <protocol>tcp</protocol>
+              </server>
+              <auto_restart>yes</auto_restart>
+              <enrollment>
+                <enabled>yes</enabled>
+                <agent_name>{{ inventory_hostname }}</agent_name>
+              </enrollment>
+            </client>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <frequency>300</frequency>
+              <scan_on_start>yes</scan_on_start>
+              <directories check_all="yes" realtime="yes" report_changes="yes">/etc,/usr/bin,/usr/sbin,/bin,/sbin</directories>
+              <directories check_all="yes" realtime="yes" report_changes="yes">/root,/home,/var/www,/opt</directories>
+              <ignore>/etc/mtab</ignore>
+              <ignore>/etc/hosts.deny</ignore>
+            </syscheck>
+
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/auth.log</location>
+            </localfile>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/secure</location>
+            </localfile>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/syslog</location>
+            </localfile>
+            <localfile>
+              <log_format>syslog</log_format>
+              <location>/var/log/messages</location>
+            </localfile>
+            <localfile>
+              <log_format>audit</log_format>
+              <location>/var/log/audit/audit.log</location>
+            </localfile>
+          </ossec_config>
+      notify: restart wazuh-agent
+
+    - name: Ensure Wazuh Agent is enabled and running
+      ansible.builtin.service:
+        name: wazuh-agent
+        state: started
+        enabled: true
+
+# =============================================================================
+# PLAY 4: DEPLOY SYSMON & WAZUH AGENT TO WINDOWS HOSTS (offline, from jumpbox)
+# =============================================================================
+- name: Deploy Wazuh Agent and Sysmon to Windows
+  hosts: windows
+  gather_facts: true
+  vars:
+    wazuh_manager_ip: "{{ hostvars['localhost']['resolved_manager_ip'] }}"
+    wazuh_agent_version: "4.9.0-1"
+    files_dir: "{{ playbook_dir }}/files"
+
+  handlers:
+    - name: restart wazuh agent
+      ansible.windows.win_service:
+        name: Wazuh
+        state: restarted
+
+  tasks:
+    - name: Create staging directory C:\Tools
+      ansible.windows.win_file:
+        path: C:\Tools
+        state: directory
+
+    - name: Copy Sysmon64 from jumpbox
+      ansible.windows.win_copy:
+        src: "{{ files_dir }}/Sysmon64.exe"
+        dest: C:\Tools\Sysmon64.exe
+
+    - name: Copy Sysmon config from jumpbox
+      ansible.windows.win_copy:
+        src: "{{ files_dir }}/sysmonconfig.xml"
+        dest: C:\Tools\sysmonconfig.xml
+      register: sysmon_cfg
+
+    - name: Check whether Sysmon is already installed
+      ansible.windows.win_service_info:
+        name: Sysmon64
+      register: sysmon_svc
+
+    - name: Install Sysmon service (fresh install)
+      ansible.windows.win_command: C:\Tools\Sysmon64.exe -accepteula -i C:\Tools\sysmonconfig.xml
+      when: not sysmon_svc.exists
+
+    - name: Reload Sysmon config (already installed, config changed)
+      ansible.windows.win_command: C:\Tools\Sysmon64.exe -c C:\Tools\sysmonconfig.xml
+      when:
+        - sysmon_svc.exists
+        - sysmon_cfg is changed
+
+    - name: Ensure Sysmon service is running and automatic
+      ansible.windows.win_service:
+        name: Sysmon64
+        state: started
+        start_mode: auto
+
+    - name: Increase Sysmon Operational log size to 1 GB
+      ansible.windows.win_command: wevtutil sl Microsoft-Windows-Sysmon/Operational /ms:1073741824
+      changed_when: false
+
+    - name: Copy Wazuh Agent MSI from jumpbox
+      ansible.windows.win_copy:
+        src: "{{ files_dir }}/wazuh-agent-{{ wazuh_agent_version }}.msi"
+        dest: C:\Tools\wazuh-agent.msi
+
+    - name: Install Wazuh Agent MSI
+      ansible.windows.win_package:
+        path: C:\Tools\wazuh-agent.msi
+        arguments: /q WAZUH_MANAGER="{{ wazuh_manager_ip }}" WAZUH_AGENT_NAME="{{ inventory_hostname }}"
+        state: present
+      notify: restart wazuh agent
+
+    - name: Update ossec.conf for Sysmon ingestion and FIM
+      ansible.windows.win_copy:
+        dest: C:\Program Files (x86)\ossec-agent\ossec.conf
+        content: |
+          <ossec_config>
+            <client>
+              <server>
+                <address>{{ wazuh_manager_ip }}</address>
+                <port>1514</port>
+                <protocol>tcp</protocol>
+              </server>
+              <auto_restart>yes</auto_restart>
+              <enrollment>
+                <enabled>yes</enabled>
+                <agent_name>{{ inventory_hostname }}</agent_name>
+              </enrollment>
+            </client>
+
+            <syscheck>
+              <disabled>no</disabled>
+              <frequency>300</frequency>
+              <scan_on_start>yes</scan_on_start>
+              <directories check_all="yes" realtime="yes">C:\Windows\System32\drivers\etc</directories>
+              <directories check_all="yes" realtime="yes">C:\inetpub\wwwroot</directories>
+              <directories check_all="yes" realtime="yes">C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup</directories>
+            </syscheck>
+
+            <!-- Ingest Sysmon Events -->
+            <localfile>
+              <location>Microsoft-Windows-Sysmon/Operational</location>
+              <log_format>eventchannel</log_format>
+            </localfile>
+
+            <!-- Ingest Security & System Event Logs -->
+            <localfile>
+              <location>Security</location>
+              <log_format>eventchannel</log_format>
+              <query>Event/System[EventID != 5145 and EventID != 5156]</query>
+            </localfile>
+            <localfile>
+              <location>System</location>
+              <log_format>eventchannel</log_format>
+            </localfile>
+          </ossec_config>
+      notify: restart wazuh agent
+
+    - name: Ensure Wazuh Agent service is running and automatic
+      ansible.windows.win_service:
+        name: Wazuh
+        state: started
+        start_mode: auto

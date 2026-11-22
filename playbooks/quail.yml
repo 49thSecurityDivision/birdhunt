@@ -1,0 +1,303 @@
+---
+# =============================================================================
+# LINUX USER AUDIT, BACKDOOR DETECTION, AND PASSWORD ROTATION
+#
+# Converted from Python audit script into a native Ansible playbook.
+# Audits /etc/passwd and /etc/shadow:
+#   1. Backs up /etc/passwd and /etc/shadow with timestamp.
+#   2. Relocates unshadowed passwords in /etc/passwd to /etc/shadow.
+#   3. Audits and detects rogue UID 0 accounts (backdoors), duplicate UIDs,
+#      and root group (GID 0) members.
+#   4. Audits login shells against /etc/shells.
+#   5. Deletes or locks blacklisted users (from inventory `blacklist`).
+#   6. Rotates user passwords (supports inventory `user_passwords` or
+#      deterministic `seed_val`).
+#   7. Updates in-memory Ansible authentication credentials.
+# =============================================================================
+
+- name: Linux User Audit and Credential Management
+  hosts: linux
+  become: true
+  gather_facts: true
+  vars:
+    # Optional runtime flags:
+    # seed_val: if provided (-e "seed_val=..."), derives deterministic passwords
+    # auto_remediate_backdoors: true (default) locks non-root UID 0 accounts
+    auto_remediate_backdoors: true
+    backup_dir: "/root/birdhunt_backups"
+
+  tasks:
+    - name: Ensure backup directory exists
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Timestamp for backup
+      ansible.builtin.set_fact:
+        bh_ts: "{{ '%Y%m%d_%H%M%S' | strftime(ansible_date_time.epoch) }}"
+
+    - name: Create safety backups of /etc/passwd and /etc/shadow
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "/etc/passwd", dest: "{{ backup_dir }}/passwd.{{ bh_ts }}.bak", mode: "0644" }
+        - { src: "/etc/shadow", dest: "{{ backup_dir }}/shadow.{{ bh_ts }}.bak", mode: "0600" }
+
+    # =========================================================================
+    # STEP 1: AUDIT & RELOCATE UNENCRYPTED / UN-SHADOWED PASSWORDS
+    # Migrates any plaintext or hash directly in /etc/passwd to /etc/shadow,
+    # setting passwd field 2 to 'x'.
+    # =========================================================================
+    - name: Relocate unshadowed passwords from /etc/passwd to /etc/shadow
+      ansible.builtin.shell: |
+        python3 - <<'PYEOF'
+        import sys, time
+        days_since_epoch = int(time.time() // 86400)
+
+        with open('/etc/passwd', 'r') as f:
+            passwd_lines = [l.strip().split(':') for l in f if l.strip()]
+
+        with open('/etc/shadow', 'r') as f:
+            shadow_dict = {}
+            for l in f:
+                if l.strip():
+                    parts = l.strip().split(':')
+                    shadow_dict[parts[0]] = parts
+
+        unshadowed_found = []
+        passwd_updated = False
+        new_passwd_lines = []
+
+        for entry in passwd_lines:
+            if len(entry) < 7:
+                new_passwd_lines.append(':'.join(entry))
+                continue
+            username = entry[0]
+            pw = entry[1]
+            if pw != 'x':
+                unshadowed_found.append(username)
+                passwd_updated = True
+                entry[1] = 'x'
+                # Update or insert into shadow
+                if username in shadow_dict:
+                    shadow_dict[username][1] = pw
+                    shadow_dict[username][2] = str(days_since_epoch)
+                else:
+                    shadow_dict[username] = [username, pw, str(days_since_epoch), '0', '99999', '7', '', '', '']
+            new_passwd_lines.append(':'.join(entry))
+
+        if passwd_updated:
+            with open('/etc/passwd.birdhunt.tmp', 'w') as f:
+                f.write('\n'.join(new_passwd_lines) + '\n')
+            with open('/etc/shadow.birdhunt.tmp', 'w') as f:
+                for parts in shadow_dict.values():
+                    f.write(':'.join(parts) + '\n')
+            import subprocess
+            subprocess.run(['chmod', '644', '/etc/passwd.birdhunt.tmp'], check=True)
+            subprocess.run(['chmod', '640', '/etc/shadow.birdhunt.tmp'], check=True)
+            subprocess.run(['mv', '/etc/passwd.birdhunt.tmp', '/etc/passwd'], check=True)
+            subprocess.run(['mv', '/etc/shadow.birdhunt.tmp', '/etc/shadow'], check=True)
+            print(f"Fixed {len(unshadowed_found)} unshadowed accounts: {', '.join(unshadowed_found)}")
+        else:
+            print("No unshadowed passwords found.")
+        PYEOF
+      register: unshadow_out
+      changed_when: "'Fixed' in unshadow_out.stdout"
+
+    - name: Report unshadowed password status
+      ansible.builtin.debug:
+        msg: "{{ unshadow_out.stdout }}"
+      when: unshadow_out.stdout | length > 0
+
+    # =========================================================================
+    # STEP 2: AUDIT USERS, ROOT UIDs (UID 0), DUPLICATE UIDs, ROOT GIDs (GID 0)
+    # =========================================================================
+    - name: Run account security audit (UID 0, duplicate UIDs, GID 0, shell check)
+      ansible.builtin.shell: |
+        python3 - <<'PYEOF'
+        import json, os
+
+        valid_shells = set()
+        if os.path.exists('/etc/shells'):
+            with open('/etc/shells', 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        valid_shells.add(line)
+
+        shadow_status = {}
+        if os.path.exists('/etc/shadow'):
+            with open('/etc/shadow', 'r') as f:
+                for line in f:
+                    if line.strip():
+                        parts = line.strip().split(':')
+                        uname = parts[0]
+                        pwd = parts[1] if len(parts) > 1 else ''
+                        is_locked = pwd.startswith('!') or pwd.startswith('*') or len(pwd) == 0
+                        shadow_status[uname] = {'locked': is_locked, 'has_hash': not is_locked}
+
+        user_entries = []
+        uid_map = {}
+        gid_map = {}
+        root_uids = []
+        root_gids = []
+        shell_mismatch = []
+
+        with open('/etc/passwd', 'r') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                parts = line.strip().split(':')
+                if len(parts) < 7:
+                    continue
+                username, _, uid_str, gid_str, comment, home, shell = parts[:7]
+                uid = int(uid_str)
+                gid = int(gid_str)
+                
+                # Check root UID backdoors
+                if uid == 0 and username != 'root':
+                    root_uids.append(username)
+                
+                # Check root GID
+                if gid == 0 and username != 'root':
+                    root_gids.append(username)
+                
+                # Duplicate UIDs
+                uid_map.setdefault(uid, []).append(username)
+                
+                # Shell audit
+                has_valid_shell = shell in valid_shells
+                user_locked = shadow_status.get(username, {}).get('locked', True)
+                if not user_locked and not has_valid_shell:
+                    shell_mismatch.append({'username': username, 'shell': shell, 'issue': 'active_password_no_valid_shell'})
+
+                user_entries.append({
+                    'username': username,
+                    'uid': uid,
+                    'gid': gid,
+                    'shell': shell,
+                    'has_valid_shell': has_valid_shell,
+                    'locked': user_locked
+                })
+
+        dup_uids = {str(uid): ulist for uid, ulist in uid_map.items() if len(ulist) > 1}
+
+        report = {
+            'root_uids': root_uids,
+            'root_gids': root_gids,
+            'duplicate_uids': dup_uids,
+            'shell_mismatches': shell_mismatch,
+            'all_users': [u['username'] for u in user_entries]
+        }
+        print(json.dumps(report))
+        PYEOF
+      register: audit_report_raw
+      changed_when: false
+
+    - name: Parse security audit findings
+      ansible.builtin.set_fact:
+        audit_report: "{{ audit_report_raw.stdout | from_json }}"
+
+    # =========================================================================
+    # STEP 3: DISPLAY CRITICAL SECURITY ALERTS
+    # =========================================================================
+    - name: ALERT - Backdoor Root UID (UID 0) Users Found!
+      ansible.builtin.debug:
+        msg: "CRITICAL: Rogue UID 0 user detected on {{ inventory_hostname }}: {{ item }} (Potential Red Team Backdoor!)"
+      loop: "{{ audit_report.root_uids | default([]) }}"
+      when: audit_report.root_uids | length > 0
+
+    - name: ALERT - Root GID (GID 0) Users Found
+      ansible.builtin.debug:
+        msg: "WARNING: User {{ item }} on {{ inventory_hostname }} has primary GID 0 (root group)!"
+      loop: "{{ audit_report.root_gids | default([]) }}"
+      when: audit_report.root_gids | length > 0
+
+    - name: ALERT - Duplicate UIDs Found
+      ansible.builtin.debug:
+        msg: "WARNING: Duplicate UID {{ item.key }} shared by accounts: {{ item.value }}"
+      loop: "{{ audit_report.duplicate_uids | dict2items }}"
+      when: (audit_report.duplicate_uids | length) > 0
+
+    - name: ALERT - Active Accounts Without Valid Login Shell
+      ansible.builtin.debug:
+        msg: "NOTICE: User {{ item.username }} has an active password but shell '{{ item.shell }}' is not in /etc/shells"
+      loop: "{{ audit_report.shell_mismatches | default([]) }}"
+      when: audit_report.shell_mismatches | length > 0
+
+    # =========================================================================
+    # STEP 4: REMEDIATE ROGUE UID 0 BACKDOORS (IF CONFIGURED)
+    # =========================================================================
+    - name: Neutralize Rogue UID 0 Backdoor Accounts (Lock Account & Expire)
+      ansible.builtin.command: "passwd -l {{ item }}"
+      loop: "{{ audit_report.root_uids | default([]) }}"
+      when:
+        - auto_remediate_backdoors | bool
+        - item not in (whitelist | default([]))
+        - item != 'root'
+
+    # =========================================================================
+    # STEP 5: PURGE BLACKLISTED USERS
+    # =========================================================================
+    - name: Delete blacklisted users from inventory
+      ansible.builtin.user:
+        name: "{{ item }}"
+        state: absent
+        remove: true
+      loop: "{{ blacklist | default([]) }}"
+      when:
+        - item not in (whitelist | default([]))
+        - item != 'root'
+        - item != (ansible_user | default('root'))
+
+    # =========================================================================
+    # STEP 6: ROTATE PASSWORDS
+    # Case A: If `seed_val` is passed at runtime (-e "seed_val=..."), rotate
+    #         deterministically matching the Windows playbook strategy.
+    # Case B: If `user_passwords` dictionary is provided in inventory, apply
+    #         the defined passwords.
+    # =========================================================================
+    - name: Build target user rotation list
+      ansible.builtin.set_fact:
+        rotation_dict: >-
+          {%- if seed_val is defined and seed_val | length > 0 -%}
+            {%- set r = {} -%}
+            {%- for u in (user_passwords | default({})).keys() | list | union(['root']) -%}
+              {%- set _ = r.update({u: (u ~ inventory_hostname ~ seed_val) | hash('sha256')}) -%}
+            {%- endfor -%}
+            {{ r }}
+          {%- else -%}
+            {{ user_passwords | default({}) }}
+          {%- endif -%}
+
+    - name: Rotate Linux user passwords
+      ansible.builtin.shell: |
+        echo "{{ item.key }}:{{ item.value }}" | chpasswd
+      loop: "{{ rotation_dict | dict2items }}"
+      when:
+        - rotation_dict is defined
+        - item.value is defined
+        - item.value | length > 0
+      no_log: true
+
+    - name: Precompute new root/ansible_user session password if rotated
+      ansible.builtin.set_fact:
+        new_session_pass: "{{ rotation_dict[ansible_user | default('root')] }}"
+      when:
+        - rotation_dict is defined
+        - (ansible_user | default('root')) in rotation_dict
+
+    - name: Update Ansible in-memory session credentials
+      ansible.builtin.set_fact:
+        ansible_password: "{{ new_session_pass }}"
+        ansible_become_password: "{{ new_session_pass }}"
+      when: new_session_pass is defined
+      no_log: true
+
+    - name: Report rotation summary
+      ansible.builtin.debug:
+        msg: "Successfully audited and rotated {{ rotation_dict.keys() | list | length }} user accounts on {{ inventory_hostname }}."

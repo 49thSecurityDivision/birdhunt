@@ -1,0 +1,272 @@
+---
+# =============================================================================
+# BIRDHUNT NETWORK MAPPING PLAYBOOK
+#
+# Collects active listening ports and established connections from all
+# Linux and Windows nodes, then aggregates and renders a network diagram
+# on the jumpbox via Graphviz.
+# =============================================================================
+
+- name: Collect network state from Linux hosts
+  hosts: linux
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Enumerate listeners and established connections
+      ansible.builtin.shell: |
+        python3 - <<'PYEOF'
+        import subprocess, re, json
+        def run(c):
+            return subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+        listening = []
+        for line in run("ss -tulnH -p").splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            proto = parts[0]
+            port = parts[4].rsplit(':', 1)[-1]
+            m = re.search(r'\("([^"]+)"', line)
+            listening.append({"port": port, "proto": proto, "process": (m.group(1) if m else "")})
+        conns = []
+        for line in run("ss -tnH state established").splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            peer = parts[4]
+            ip = peer.rsplit(':', 1)[0].strip('[]')
+            rp = peer.rsplit(':', 1)[-1]
+            if ip in ("127.0.0.1", "::1"):
+                continue
+            conns.append({"remote_ip": ip, "remote_port": rp})
+        print(json.dumps({"listening": listening, "connections": conns}))
+        PYEOF
+      register: lin_report
+      changed_when: false
+ 
+    - name: Store Linux node report
+      ansible.builtin.set_fact:
+        node_report: "{{ lin_report.stdout | from_json }}"
+ 
+ 
+- name: Collect network state from Windows hosts
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Enumerate listeners and established connections
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $tcp = Get-NetTCPConnection -State Listen | ForEach-Object {
+            $p = Get-Process -Id $_.OwningProcess
+            [pscustomobject]@{ port = [string]$_.LocalPort; proto = 'tcp'; process = [string]$p.Name }
+          }
+          $udp = Get-NetUDPEndpoint | ForEach-Object {
+            $p = Get-Process -Id $_.OwningProcess
+            [pscustomobject]@{ port = [string]$_.LocalPort; proto = 'udp'; process = [string]$p.Name }
+          }
+          $est = Get-NetTCPConnection -State Established |
+            Where-Object { $_.RemoteAddress -notmatch '^(127\.|::1$|0\.0\.0\.0$)' } |
+            ForEach-Object {
+              [pscustomobject]@{ remote_ip = [string]$_.RemoteAddress; remote_port = [string]$_.RemotePort }
+            }
+          [pscustomobject]@{ listening = @($tcp) + @($udp); connections = @($est) }
+      register: win_report
+ 
+    - name: Store Windows node report
+      ansible.builtin.set_fact:
+        node_report: "{{ win_report.output[0] }}"
+ 
+ 
+- name: Render the network map on the jumpbox
+  hosts: localhost
+  gather_facts: true
+  vars:
+    graph_dir: "{{ playbook_dir }}/../network-maps"
+  tasks:
+    - name: Ensure Graphviz is installed
+      ansible.builtin.apt:
+        name: graphviz
+        state: present
+        update_cache: true
+      become: true
+ 
+    - name: Collect the jumpbox's own network state
+      ansible.builtin.shell: |
+        python3 - <<'PYEOF'
+        import subprocess, re, json
+        def run(c):
+            return subprocess.run(c, shell=True, capture_output=True, text=True).stdout
+        listening = []
+        for line in run("ss -tulnH -p").splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            port = parts[4].rsplit(':', 1)[-1]
+            m = re.search(r'\("([^"]+)"', line)
+            listening.append({"port": port, "proto": parts[0], "process": (m.group(1) if m else "")})
+        conns = []
+        for line in run("ss -tnH state established").splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            ip = parts[4].rsplit(':', 1)[0].strip('[]')
+            rp = parts[4].rsplit(':', 1)[-1]
+            if ip in ("127.0.0.1", "::1"):
+                continue
+            conns.append({"remote_ip": ip, "remote_port": rp})
+        print(json.dumps({"listening": listening, "connections": conns}))
+        PYEOF
+      register: jump_report
+      changed_when: false
+      become: true
+ 
+    - name: Store jumpbox node report
+      ansible.builtin.set_fact:
+        node_report: "{{ jump_report.stdout | from_json }}"
+ 
+    - name: Timestamp for this run
+      ansible.builtin.set_fact:
+        ts: "{{ '%Y%m%d-%H%M%S' | strftime(ansible_date_time.epoch) }}"
+ 
+    - name: Build the Graphviz DOT file and JSON sidecar
+      ansible.builtin.shell: |
+        python3 - <<'PYEOF'
+        import os, json
+ 
+        reports = json.loads(os.environ['REPORTS'])
+        ips     = json.loads(os.environ['IPS'])
+        win     = set(json.loads(os.environ['WIN']))
+        lin     = set(json.loads(os.environ['LIN']))
+        jump    = set(json.loads(os.environ['JUMP']))
+        jump_ip = os.environ.get('JUMP_IP', '')
+        outdir  = os.environ['OUTDIR']
+        dotpath = os.environ['DOTPATH']
+        jsonpath = os.environ['JSONPATH']
+ 
+        os.makedirs(outdir, exist_ok=True)
+ 
+        # The jumpbox has no ansible_host; give it its detected LAN IP.
+        for h in jump:
+            if not ips.get(h):
+                ips[h] = jump_ip
+ 
+        ip2host = {ip: h for h, ip in ips.items() if ip}
+ 
+        def norm(x):
+            if not x:
+                return []
+            return x if isinstance(x, list) else [x]
+ 
+        def esc(s):
+            s = str(s)
+            for a, b in (('&', '&amp;'), ('<', '&lt;'), ('>', '&gt;'), ('"', '&quot;')):
+                s = s.replace(a, b)
+            return s
+ 
+        def palette(h):
+            if h in jump: return '#fde2b3', '#b8860b'
+            if h in win:  return '#d9e8ff', '#2b6cb0'
+            if h in lin:  return '#d8f5d8', '#2f855a'
+            return '#eeeeee', '#999999'
+ 
+        # port -> process, per host, for edge labels and edge filtering
+        listen = {}
+        for h, rep in reports.items():
+            pm = {}
+            for l in norm((rep or {}).get('listening')):
+                pm[str(l.get('port'))] = l.get('process') or ''
+            listen[h] = pm
+ 
+        lines = [
+            'digraph network {',
+            '  rankdir=LR;',
+            '  graph [fontname="Helvetica", bgcolor="white", labelloc="t", '
+            'fontsize=18, label="BirdHunt network map"];',
+            '  node [fontname="Helvetica", shape=plaintext];',
+            '  edge [fontname="Helvetica", fontsize=9, color="#555555"];',
+        ]
+ 
+        for h in sorted(set(list(ips) + list(reports))):
+            rep = reports.get(h) or {}
+            reachable = bool(rep)
+            fill, border = palette(h)
+            ip = ips.get(h, '')
+            seen = []
+            for l in norm(rep.get('listening')):
+                key = (l.get('proto'), str(l.get('port')), l.get('process') or '')
+                if key not in seen:
+                    seen.append(key)
+            seen.sort(key=lambda k: (k[0], int(k[1]) if str(k[1]).isdigit() else 0))
+            shown = seen[:14]
+            rows = ''
+            for proto, port, proc in shown:
+                rows += ('<tr><td align="left">%s/%s</td>'
+                         '<td align="left">%s</td></tr>' % (esc(proto), esc(port), esc(proc)))
+            if len(seen) > 14:
+                rows += ('<tr><td colspan="2" align="left">+%d more</td></tr>'
+                         % (len(seen) - 14))
+            if not shown:
+                rows = ('<tr><td colspan="2"><i>%s</i></td></tr>'
+                        % ('no listeners seen' if reachable else 'unreachable'))
+            label = (
+                '<<table border="1" cellborder="0" cellspacing="0" cellpadding="3" '
+                'bgcolor="%s" color="%s">'
+                '<tr><td colspan="2"><b>%s</b></td></tr>'
+                '<tr><td colspan="2">%s</td></tr>%s</table>>'
+                % (fill, border, esc(h), esc(ip), rows)
+            )
+            lines.append('  "%s" [label=%s];' % (h, label))
+ 
+        # Edges: keep only client -> server connections aimed at a port the
+        # target is actually listening on. Drops ephemeral management noise and
+        # collapses each direction to one edge.
+        edges = set()
+        for h, rep in reports.items():
+            for c in norm((rep or {}).get('connections')):
+                rip = str(c.get('remote_ip', '')).strip('[]')
+                tgt = ip2host.get(rip)
+                if not tgt or tgt == h:
+                    continue
+                rport = str(c.get('remote_port', ''))
+                if rport not in listen.get(tgt, {}):
+                    continue
+                if (h, tgt, rport) in edges:
+                    continue
+                edges.add((h, tgt, rport))
+                svc = listen[tgt].get(rport, '')
+                lbl = (svc + ' ' if svc else '') + rport
+                lines.append('  "%s" -> "%s" [label="%s"];' % (h, tgt, esc(lbl)))
+ 
+        lines.append('}')
+        with open(dotpath, 'w') as f:
+            f.write('\n'.join(lines))
+        with open(jsonpath, 'w') as f:
+            json.dump({"ips": ips, "reports": reports}, f, indent=2)
+        PYEOF
+      environment:
+        OUTDIR: "{{ graph_dir }}"
+        DOTPATH: "{{ graph_dir }}/network-{{ ts }}.dot"
+        JSONPATH: "{{ graph_dir }}/network-{{ ts }}.json"
+        JUMP_IP: "{{ ansible_default_ipv4.address | default('') }}"
+        WIN: "{{ groups['windows'] | default([]) | to_json }}"
+        LIN: "{{ groups['linux'] | default([]) | to_json }}"
+        JUMP: "{{ groups['jumpbox'] | default([]) | to_json }}"
+        IPS: "{{ dict(groups['all'] | zip(groups['all'] | map('extract', hostvars, 'ansible_host') | map('default', ''))) | to_json }}"
+        REPORTS: "{{ dict(groups['all'] | zip(groups['all'] | map('extract', hostvars, 'node_report') | map('default', {}))) | to_json }}"
+      changed_when: true
+ 
+    - name: Render PNG
+      ansible.builtin.command: >
+        dot -Tpng {{ graph_dir }}/network-{{ ts }}.dot
+        -o {{ graph_dir }}/network-{{ ts }}.png
+      changed_when: true
+ 
+    - name: Render SVG
+      ansible.builtin.command: >
+        dot -Tsvg {{ graph_dir }}/network-{{ ts }}.dot
+        -o {{ graph_dir }}/network-{{ ts }}.svg
+      changed_when: true
+ 
+    - name: Report output location
+      ansible.builtin.debug:
+        msg: "Network map written to {{ graph_dir }}/network-{{ ts }}.png (also .svg, .dot, .json)"

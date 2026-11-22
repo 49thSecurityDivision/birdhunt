@@ -1,0 +1,58 @@
+---
+# =============================================================================
+# BIRDHUNT - "BIRD SHOT" MASTER CCDC ORCHESTRATION PLAYBOOK
+#
+# Runs the full Blue Team rapid-response deployment pipeline:
+#   Phase 1 (snipe.yml): Network Topology & Port/Process Discovery
+#   Phase 2A (quail.yml): Linux User Auditing & Password Rotation
+#   Phase 2B (turkey.yml): Windows Local Account & Password Rotation
+#   Phase 3A (partridge.yml): Windows Defensive Tooling Deployment
+#   Phase 3B (pheasant.yml): Linux Defensive Tooling Deployment
+#   Phase 4 (guineafowl.yml): Wazuh SIEM & Sysmon Deployment
+#
+# Usage:
+#   ansible-playbook playbooks/birdshot.yml -e "seed_val=CCDC2026SecureSeed!"
+#   ansible-playbook playbooks/birdshot.yml --tags map
+#   ansible-playbook playbooks/birdshot.yml --tags passwords -e "seed_val=CCDC2026SecureSeed!"
+#   ansible-playbook playbooks/birdshot.yml --tags tools
+#   ansible-playbook playbooks/birdshot.yml --tags wazuh
+# =============================================================================
+
+- name: "Phase 1: Network Topology & Connection Discovery (Snipe)"
+  import_playbook: snipe.yml
+  tags:
+    - map
+    - discovery
+
+- name: "Phase 2A: Linux User Auditing & Password Rotation (Quail)"
+  import_playbook: quail.yml
+  tags:
+    - passwords
+    - users
+    - linux_passwords
+
+- name: "Phase 2B: Windows Local Account & Password Rotation (Turkey)"
+  import_playbook: turkey.yml
+  tags:
+    - passwords
+    - users
+    - windows_passwords
+
+- name: "Phase 3A: Windows Defensive Tooling Deployment (Partridge)"
+  import_playbook: partridge.yml
+  tags:
+    - tools
+    - windows_tools
+
+- name: "Phase 3B: Linux Defensive Tooling Deployment (Pheasant)"
+  import_playbook: pheasant.yml
+  tags:
+    - tools
+    - linux_tools
+
+- name: "Phase 4: Wazuh SIEM & Sysmon Deployment (Guineafowl)"
+  import_playbook: guineafowl.yml
+  tags:
+    - wazuh
+    - siem
+    - agents

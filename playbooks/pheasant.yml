@@ -1,0 +1,255 @@
+---
+# =============================================================================
+# LINUX DEFENSIVE & INCIDENT RESPONSE TOOLING DEPLOYMENT
+#
+# Installs essential triage, auditing, network capture, and forensic tools
+# across Debian/Ubuntu, RHEL/CentOS/Rocky, and Alpine hosts.
+# Deploys BirdHunt rapid triage and binary integrity scripts to /opt/birdhunt/tools/
+# and adds them to the system PATH.
+#
+# Works offline if packages are pre-cached, and tolerates air-gapped repositories.
+# =============================================================================
+
+- name: Deploy Defensive Tooling to Linux Hosts
+  hosts: linux
+  become: true
+  gather_facts: true
+  vars:
+    birdhunt_base_dir: "/opt/birdhunt"
+    birdhunt_tools_dir: "/opt/birdhunt/tools"
+    birdhunt_logs_dir: "/opt/birdhunt/logs"
+    files_dir: "{{ playbook_dir }}/files"
+
+    # Debian / Ubuntu package suite
+    debian_tools:
+      - lsof
+      - tcpdump
+      - htop
+      - psmisc
+      - strace
+      - auditd
+      - debsums
+      - tmux
+      - net-tools
+      - curl
+      - wget
+      - rsync
+
+    # RHEL / CentOS / Rocky package suite
+    redhat_tools:
+      - lsof
+      - tcpdump
+      - htop
+      - psmisc
+      - strace
+      - audit
+      - tmux
+      - net-tools
+      - curl
+      - wget
+      - rsync
+
+    # Alpine package suite
+    alpine_tools:
+      - lsof
+      - tcpdump
+      - htop
+      - strace
+      - tmux
+      - curl
+      - shadow
+      - bash
+
+  tasks:
+    # =========================================================================
+    # STEP 1: INITIALIZE BIRDHUNT TOOLKIT DIRECTORIES
+    # =========================================================================
+    - name: Create BirdHunt directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      loop:
+        - "{{ birdhunt_base_dir }}"
+        - "{{ birdhunt_tools_dir }}"
+        - "{{ birdhunt_logs_dir }}"
+
+    # =========================================================================
+    # STEP 2: INSTALL SYSTEM PACKAGES (Tolerates offline mirrors)
+    # =========================================================================
+    - name: Install defensive tools on Debian/Ubuntu hosts
+      ansible.builtin.apt:
+        name: "{{ debian_tools }}"
+        state: present
+        update_cache: false
+      when: ansible_os_family == "Debian"
+      failed_when: false
+      register: deb_tool_result
+
+    - name: Install defensive tools on RHEL/CentOS/Rocky hosts
+      ansible.builtin.dnf:
+        name: "{{ redhat_tools }}"
+        state: present
+        disable_gpg_check: true
+      when: ansible_os_family == "RedHat"
+      failed_when: false
+      register: rhel_tool_result
+
+    - name: Install defensive tools on Alpine hosts
+      community.general.apk:
+        name: "{{ alpine_tools }}"
+        state: present
+      when: ansible_os_family == "Alpine"
+      failed_when: false
+      register: alpine_tool_result
+
+    # =========================================================================
+    # STEP 3: ENABLE SYSTEM AUDIT DAEMON (IF AVAILABLE)
+    # =========================================================================
+    - name: Ensure auditd service is enabled and running
+      ansible.builtin.service:
+        name: auditd
+        state: started
+        enabled: true
+      failed_when: false
+      when: ansible_os_family in ["Debian", "RedHat"]
+
+    # =========================================================================
+    # STEP 4: DEPLOY BIRDHUNT RAPID TRIAGE SCRIPT
+    # =========================================================================
+    - name: Deploy rapid incident triage script
+      ansible.builtin.copy:
+        dest: "{{ birdhunt_tools_dir }}/triage.sh"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          # BirdHunt Rapid Incident Triage Tool
+          # Inspects processes, persistence, SUID, and foreign network sockets
+          
+          set -u
+          OUT="{{ birdhunt_logs_dir }}/triage_$(date +%Y%m%d_%H%M%S).log"
+          echo "========================================================" | tee -a "$OUT"
+          echo "BIRDHUNT RAPID TRIAGE REPORT - $(hostname) - $(date)"    | tee -a "$OUT"
+          echo "========================================================" | tee -a "$OUT"
+
+          echo -e "\n[+] 1. Listening Ports & Bound Processes:" | tee -a "$OUT"
+          if command -v ss >/dev/null 2>&1; then
+            ss -tulnp | tee -a "$OUT"
+          elif command -v netstat >/dev/null 2>&1; then
+            netstat -tulnp | tee -a "$OUT"
+          fi
+
+          echo -e "\n[+] 2. Established Connections (Excluding Localhost):" | tee -a "$OUT"
+          if command -v ss >/dev/null 2>&1; then
+            ss -tn state established | grep -v '127.0.0.1' | grep -v '::1' | tee -a "$OUT"
+          fi
+
+          echo -e "\n[+] 3. Processes Running from Deleted / Unlinked Executables:" | tee -a "$OUT"
+          ls -l /proc/*/exe 2>/dev/null | grep '(deleted)' | tee -a "$OUT" || echo "None found." | tee -a "$OUT"
+
+          echo -e "\n[+] 4. SUID Binaries (Potential Privilege Escalation Backdoors):" | tee -a "$OUT"
+          find / -xdev -type f -perm -4000 2>/dev/null | sort | tee -a "$OUT"
+
+          echo -e "\n[+] 5. Crontab & Systemd Timer Persistence:" | tee -a "$OUT"
+          echo "--- Crontabs ---" | tee -a "$OUT"
+          head -n 100 /etc/crontab /etc/cron.*/* /var/spool/cron/* 2>/dev/null | tee -a "$OUT"
+          echo "--- Systemd Timers ---" | tee -a "$OUT"
+          systemctl list-timers --no-pager 2>/dev/null | head -n 25 | tee -a "$OUT"
+
+          echo -e "\n[+] 6. Authorized SSH Keys Across All Users:" | tee -a "$OUT"
+          find /home /root -name "authorized_keys" -exec head -v -n 100 {} + 2>/dev/null | tee -a "$OUT"
+
+          echo -e "\n========================================================" | tee -a "$OUT"
+          echo "[✓] Triage complete. Full report written to: $OUT"
+          echo "========================================================"
+
+    # =========================================================================
+    # STEP 5: DEPLOY BINARY INTEGRITY AUDITOR SCRIPT
+    # =========================================================================
+    - name: Deploy binary integrity verification script
+      ansible.builtin.copy:
+        dest: "{{ birdhunt_tools_dir }}/check_integrity.sh"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env bash
+          # BirdHunt Binary Integrity Check
+          # Detects altered/trojaned system binaries (ls, ps, sshd, netstat, etc.)
+          
+          set -u
+          echo "[*] Checking system binary integrity against package manager databases..."
+
+          if command -v debsums >/dev/null 2>&1; then
+            echo "[+] Running debsums (reporting altered files)..."
+            debsums -c 2>&1 | tee /tmp/debsums_altered.log
+            if [ -s /tmp/debsums_altered.log ]; then
+              echo "[-] WARNING: Altered files detected by debsums!"
+              cat /tmp/debsums_altered.log
+            else
+              echo "[✓] All verified packages matched package checksums."
+            fi
+          elif command -v rpm >/dev/null 2>&1; then
+            echo "[+] Running rpm -Va (filtering for binary modifications)..."
+            rpm -Va --nomtime --nosize 2>&1 | grep -E '^..5' | tee /tmp/rpm_altered.log || true
+            if [ -s /tmp/rpm_altered.log ]; then
+              echo "[-] WARNING: Altered binary checksums detected by RPM!"
+              cat /tmp/rpm_altered.log
+            else
+              echo "[✓] No altered binary checksums detected."
+            fi
+          else
+            echo "[-] Neither debsums nor rpm available on this host."
+          fi
+
+    # =========================================================================
+    # STEP 6: CONFIGURE SYSTEM PATH TO INCLUDE BIRDHUNT TOOLS
+    # =========================================================================
+    - name: Add BirdHunt tools directory to global system PATH
+      ansible.builtin.copy:
+        dest: /etc/profile.d/birdhunt.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Add BirdHunt tools to PATH
+          if [ -d "{{ birdhunt_tools_dir }}" ]; then
+            case ":$PATH:" in
+              *":{{ birdhunt_tools_dir }}:"*) ;;
+              *) export PATH="$PATH:{{ birdhunt_tools_dir }}" ;;
+            esac
+          fi
+
+    # =========================================================================
+    # STEP 7: OPTIONALLY COPY STAGED OFFLINE TOOLS FROM JUMPBOX
+    # =========================================================================
+    - name: Check for staged offline Linux tools on jumpbox
+      ansible.builtin.stat:
+        path: "{{ files_dir }}/linux_tools"
+      delegate_to: localhost
+      become: false
+      register: staged_linux_tools
+
+    - name: Synchronize staged offline Linux tools if available
+      ansible.builtin.copy:
+        src: "{{ files_dir }}/linux_tools/"
+        dest: "{{ birdhunt_tools_dir }}/"
+        owner: root
+        group: root
+        mode: "0755"
+      when: staged_linux_tools.stat.exists and staged_linux_tools.stat.isdir
+      failed_when: false
+
+    # =========================================================================
+    # STEP 8: REPORT TOOL DEPLOYMENT SUMMARY
+    # =========================================================================
+    - name: Report Linux tooling status
+      ansible.builtin.debug:
+        msg: >
+          Tools successfully deployed on {{ inventory_hostname }}.
+          Toolkit available at {{ birdhunt_tools_dir }}.
+          Quick triage available: 'triage.sh' or 'check_integrity.sh'.

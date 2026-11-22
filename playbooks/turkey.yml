@@ -1,0 +1,83 @@
+---
+# =============================================================================
+# DETERMINISTIC WINDOWS PASSWORD ROTATION
+#
+# Generates high-entropy passwords deterministically based on account name,
+# hostname, and a runtime seed. Protects domain controllers from accidental
+# credential alteration while securing local administrative access.
+# =============================================================================
+
+- name: Deterministic Windows Password Rotation
+  hosts: windows
+  gather_facts: false
+  vars:
+    complexity_suffix: "B@LL5"
+
+  pre_tasks:
+    - name: Ensure seed_val is accessible
+      ansible.builtin.assert:
+        that:
+          - seed_val is defined
+          - seed_val | length > 0
+        fail_msg: "seed_val is missing from inventory or runtime flags."
+
+    - name: Query Windows domain role
+      ansible.windows.win_powershell:
+        script: |
+          (Get-CimInstance -ClassName Win32_ComputerSystem).DomainRole
+      register: domain_role_result
+
+    - name: Evaluate Domain Controller status
+      ansible.builtin.set_fact:
+        is_domain_controller: "{{ domain_role_result.output[0] | int in [4, 5] }}"
+
+  tasks:
+    - name: Skip Domain Controllers to prevent domain-wide credential alteration
+      ansible.builtin.meta: end_host
+      when: is_domain_controller
+
+    - name: Disable built-in Guest account
+      ansible.windows.win_user:
+        name: Guest
+        account_disabled: true
+        state: present
+
+    - name: Enumerate active non-system local users (excluding Administrator)
+      ansible.windows.win_powershell:
+        script: |
+          $systemAccounts = @('Guest', 'DefaultAccount', 'WDAGUtilityAccount', 'Administrator')
+          Get-LocalUser | 
+            Where-Object { 
+              $_.Enabled -eq $true -and 
+              $_.Name -notin $systemAccounts 
+            } | 
+            Select-Object -ExpandProperty Name
+      register: discovered_users
+
+    - name: Rotate passwords for discovered local accounts
+      ansible.windows.win_user:
+        name: "{{ item }}"
+        password: "{{ ((item ~ inventory_hostname ~ seed_val) | hash('sha256')) ~ complexity_suffix }}"
+        password_never_expires: true
+        state: present
+        update_password: always
+      loop: "{{ discovered_users.output | default([]) }}"
+      no_log: true
+
+    - name: Precompute new Administrator password
+      ansible.builtin.set_fact:
+        new_admin_pass: "{{ (('administrator' ~ inventory_hostname ~ seed_val) | hash('sha256')) ~ complexity_suffix }}"
+
+    - name: Rotate local Administrator password
+      ansible.windows.win_user:
+        name: administrator
+        password: "{{ new_admin_pass }}"
+        password_never_expires: true
+        state: present
+        update_password: always
+      no_log: true
+
+    - name: Update Ansible session password in-memory
+      ansible.builtin.set_fact:
+        ansible_password: "{{ new_admin_pass }}"
+      no_log: true
