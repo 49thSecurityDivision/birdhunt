@@ -54,7 +54,8 @@ ansible-playbook playbooks/birdshot.yml -e "seed_val=CCDC2026SecureSeed!"
 | :--- | :--- | :--- | :--- |
 | **All-in-One Execution** | `birdshot.yml` | `ansible-playbook playbooks/birdshot.yml -e "seed_val=..."` | `./crack_egg.sh playbooks/birdshot.yml -e "seed_val=..."` |
 | **Phase 1: Network Map** | `snipe.yml` | `ansible-playbook playbooks/snipe.yml` | `./crack_egg.sh playbooks/snipe.yml` |
-| **Phase 2A: Linux Audit & Passwords** | `quail.yml` | `ansible-playbook playbooks/quail.yml -e "seed_val=..."` | `./crack_egg.sh playbooks/quail.yml -e "seed_val=..."` |
+| **Phase 2A: Linux Audit & Passwords** | `quail.yml` | `ansible-playbook playbooks/quail.yml` *(interactive)* | `./crack_egg.sh playbooks/quail.yml` |
+| **Interactive Linux Auditor** | `candled_egg.py` | `./egg_candler.sh` | `./crack_egg.sh ./egg_candler.sh` |
 | **Phase 2B: Windows Passwords** | `turkey.yml` | `ansible-playbook playbooks/turkey.yml -e "seed_val=..."` | `./crack_egg.sh playbooks/turkey.yml -e "seed_val=..."` |
 | **Phase 3A: Windows Tools** | `partridge.yml` | `ansible-playbook playbooks/partridge.yml` | `./crack_egg.sh playbooks/partridge.yml` |
 | **Phase 3B: Linux Tools** | `pheasant.yml` | `ansible-playbook playbooks/pheasant.yml` | `./crack_egg.sh playbooks/pheasant.yml` |
@@ -71,6 +72,7 @@ BirdHunt/
 ├── hatch_egg.sh                   # Jumpbox bare-metal bootstrap script (symlink -> scripts/hatch_egg.sh)
 ├── bake_egg.sh                    # Symlink -> scripts/bake_egg.sh (Builds & exports EE container)
 ├── crack_egg.sh                   # Symlink -> scripts/crack_egg.sh (Runs playbooks inside EE container)
+├── egg_candler.sh                 # Symlink -> scripts/egg_candler.sh (Interactive user auditor - Method 2)
 ├── USER_GUIDE.md                  # Comprehensive CCDC User Guide
 ├── README.md                      # This file
 │

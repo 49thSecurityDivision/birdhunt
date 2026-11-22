@@ -157,16 +157,27 @@ Choose a secret team password seed for this match:
 SEED="CCDC2026_TeamSuperSecret!"
 ```
 
-#### Step 2A: Linux Lockdown ([`quail.yml`](file:///Users/matt/Desktop/BirdHunt/playbooks/quail.yml))
+#### Step 2A: Linux Lockdown ([`quail.yml`](file:///Users/matt/Desktop/CCDC2027/birdhunt/playbooks/quail.yml))
 ```bash
-ansible-playbook playbooks/quail.yml -e "seed_val=${SEED}"
+# Default interactive execution (Method 2 - Egg Candler):
+ansible-playbook playbooks/quail.yml
+
+# Or standalone interactive execution:
+./egg_candler.sh
+
+# Or automated non-interactive batch execution:
+ansible-playbook playbooks/quail.yml -e "seed_val=${SEED} interactive=false"
 ```
-- **Automatic Backup**: Backs up `/etc/passwd` and `/etc/shadow` to `/root/birdhunt_backups/`.
-- **Unshadows Passwords**: Finds accounts with plaintext/hashes directly in `/etc/passwd`, relocates them to `/etc/shadow`, and sets passwd field 2 to `x`.
-- **Kills Rogue UID 0 Backdoors**: Immediately alerts on any non-root user with UID 0 (e.g. `toor`, `guest`, `admin`) and locks them (`passwd -l <user>`).
-- **Purges Blacklist Users**: Removes unauthorized backdoor users specified in `nest.yaml`.
-- **Deterministic Password Rotation**: Computes and applies `((username + hostname + seed) | sha256)` across all active users.
-- **Session Preservation**: Automatically updates `ansible_password` in memory so subsequent tasks remain authenticated.
+- **Interactive Egg Candler (Method 2 - Enabled by Default)**:
+  - Connects to each Linux node over SSH and audits `/etc/passwd` & `/etc/shadow`.
+  - Fixes unshadowed accounts automatically.
+  - Prompts operator for rogue UID 0 / GID 0 accounts (`r=reassign UID, d=delete, i=ignore`).
+  - Prompts operator for each active user account:
+    `[r=rotate, A=always rotate, h=always for host, i=ignore, N=never rotate (blacklist), X=never rotate for host, d=delete]`
+  - Generates deterministic password if Enter is pressed, or accepts custom password.
+  - Safely writes updated `/etc/passwd` and `/etc/shadow` via base64 pipeline and deletes flagged users.
+  - Automatically updates `nest.yaml` with rotated passwords, blacklist, and whitelist.
+- **Verification & Safety Backups**: Creates safety backups in `/root/birdhunt_backups/`, neutralizes any remaining rogue UID 0 backdoors, and synchronizes `ansible_password` in memory.
 
 #### Step 2B: Windows Lockdown ([`turkey.yml`](file:///Users/matt/Desktop/BirdHunt/playbooks/turkey.yml))
 ```bash

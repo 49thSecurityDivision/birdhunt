@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Wrapper to run the python-based user audit using standard Python or Ansible
-exec python3 -c "
-import sys, os
+# =============================================================================
+# BIRDHUNT - "EGG CANDLER" INTERACTIVE AUDIT SHELL WRAPPER
+# =============================================================================
 
-print('[*] BirdHunt Egg Candler (User Audit Companion)')
-print('[*] Note: For native, multi-threaded CCDC operations, prefer running:')
-print('    ansible-playbook playbooks/quail.yml')
-print('    ansible-playbook playbooks/quail.yml -e \"seed_val=YourSeed!\"')
-print('')
-"
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Activate virtualenv if present
+if [ -f "${BASE_DIR}/.venv/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${BASE_DIR}/.venv/bin/activate"
+fi
+
+exec python3 "${SCRIPT_DIR}/candled_egg.py" "$@"
