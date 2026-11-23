@@ -1,1 +1,1 @@
-scripts/bake_egg.sh
+SCRIPTS/bake_egg.sh

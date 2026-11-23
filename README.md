@@ -41,7 +41,7 @@ Pre-build and air-gap the immutable container so you have **zero** dependency is
 ### Option B: Bare-Metal Jumpbox Execution (100% Offline Pre-Packaged)
 Everything is pre-packaged in the repo (`wheelhouse/`, `collections/`, `playbooks/files/`). No internet needed:
 ```bash
-chmod +x hatch_egg.sh scripts/*.sh scripts/*.py
+chmod +x hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
 sudo ./hatch_egg.sh
 
 # Verify connectivity & run:

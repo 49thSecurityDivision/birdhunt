@@ -66,7 +66,7 @@ Sit down at the Jumpbox terminal, open your shell, and pull down your pre-approv
 ```bash
 git clone <YOUR_COMPETITION_REPO_URL> BirdHunt
 cd BirdHunt
-chmod +x hatch_egg.sh bake_egg.sh crack_egg.sh scripts/*.sh scripts/*.py
+chmod +x hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
 ```
 
 ---

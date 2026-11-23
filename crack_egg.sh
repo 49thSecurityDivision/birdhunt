@@ -1,1 +1,1 @@
-scripts/crack_egg.sh
+SCRIPTS/crack_egg.sh

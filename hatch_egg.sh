@@ -1,1 +1,1 @@
-scripts/hatch_egg.sh
+SCRIPTS/hatch_egg.sh

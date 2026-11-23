@@ -18,6 +18,11 @@ WHEELHOUSE="${BASE_DIR}/wheelhouse"
 COLLECTIONS_DIR="${BASE_DIR}/collections"
 FILES_DIR="${BASE_DIR}/playbooks/files"
 
+# Ensure both 'scripts' and 'SCRIPTS' resolve on case-sensitive Linux filesystems
+if [ ! -e "${BASE_DIR}/scripts" ] && [ ! -L "${BASE_DIR}/scripts" ]; then
+    ln -sf SCRIPTS "${BASE_DIR}/scripts" 2>/dev/null || true
+fi
+
 echo "========================================================"
 echo "    BIRDHUNT - HATCHING JUMPBOX ENVIRONMENT (OFFLINE)   "
 echo "========================================================"
