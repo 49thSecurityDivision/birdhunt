@@ -9,8 +9,24 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Locate repository root (handles direct execution, symlinks, and working directory)
+if [ -f "./nest.yaml" ] || [ -d "./playbooks" ]; then
+    BASE_DIR="$(pwd)"
+else
+    SOURCE="${BASH_SOURCE[0]}"
+    while [ -L "$SOURCE" ]; do
+        DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+        SOURCE="$(readlink "$SOURCE")"
+        [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+    done
+    SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/nest.yaml" ]; then
+        BASE_DIR="${SCRIPT_DIR}"
+    else
+        BASE_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+    fi
+fi
+
 BUILDER_DIR="${BASE_DIR}/builder"
 IMAGE_TAG="birdhunt-ee:latest"
 TAR_OUTPUT="${BASE_DIR}/birdhunt-ee.tar"
@@ -26,15 +42,22 @@ elif command -v docker >/dev/null 2>&1; then
     CONTAINER_ENGINE="docker"
 else
     echo "[-] Error: Neither podman nor docker found on this machine."
-    echo "    Please install podman or docker to build the Execution Environment."
+    echo "    To run natively on bare-metal jumpbox without containers, use:"
+    echo "    ansible-playbook playbooks/birdshot.yml"
     exit 1
 fi
 echo "[+] Detected container engine: ${CONTAINER_ENGINE}"
 
 # 2. Check for ansible-builder
 if ! command -v ansible-builder >/dev/null 2>&1; then
-    echo "[!] ansible-builder not found. Attempting to install via pip3..."
-    pip3 install --quiet --upgrade ansible-builder
+    echo "[!] ansible-builder not found. Attempting to install..."
+    pip3 install --break-system-packages ansible-builder 2>/dev/null || \
+    pip3 install ansible-builder 2>/dev/null || {
+        echo "[-] Could not install ansible-builder automatically."
+        echo "    Tip: If you already ran 'sudo ./hatch_egg.sh', you DO NOT need containers!"
+        echo "    Run natively: ansible-playbook playbooks/birdshot.yml"
+        exit 1
+    }
 fi
 echo "[+] ansible-builder is ready: $(ansible-builder --version 2>/dev/null || echo 'installed')"
 

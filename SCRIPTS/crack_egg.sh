@@ -9,8 +9,24 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Locate repository root (handles direct execution, symlinks, and working directory)
+if [ -f "./nest.yaml" ] || [ -d "./playbooks" ]; then
+    BASE_DIR="$(pwd)"
+else
+    SOURCE="${BASH_SOURCE[0]}"
+    while [ -L "$SOURCE" ]; do
+        DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+        SOURCE="$(readlink "$SOURCE")"
+        [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+    done
+    SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/nest.yaml" ]; then
+        BASE_DIR="${SCRIPT_DIR}"
+    else
+        BASE_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+    fi
+fi
+
 IMAGE_TAG="birdhunt-ee:latest"
 TAR_FILE="${BASE_DIR}/birdhunt-ee.tar"
 
@@ -33,8 +49,13 @@ if ! ${CONTAINER_ENGINE} image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
         ${CONTAINER_ENGINE} load -i "${TAR_FILE}"
         echo "[✓] Loaded successfully."
     else
-        echo "[-] Error: Image '${IMAGE_TAG}' not found and ${TAR_FILE} does not exist."
-        echo "    Run './scripts/bake_egg.sh' first to build the image."
+        echo "[-] Notice: Container image '${IMAGE_TAG}' not loaded."
+        echo "    If you already ran 'sudo ./hatch_egg.sh', you DO NOT need containers!"
+        echo "    Run natively on the Jumpbox with:"
+        echo "        ansible all -m ping"
+        echo "        ansible-playbook playbooks/birdshot.yml"
+        echo ""
+        echo "    (To build the container image instead, run './SCRIPTS/bake_egg.sh')"
         exit 1
     fi
 fi

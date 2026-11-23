@@ -12,8 +12,24 @@
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Locate repository root (handles direct execution, symlinks, and working directory)
+if [ -f "./nest.yaml" ] || [ -d "./playbooks" ]; then
+    BASE_DIR="$(pwd)"
+else
+    SOURCE="${BASH_SOURCE[0]}"
+    while [ -L "$SOURCE" ]; do
+        DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+        SOURCE="$(readlink "$SOURCE")"
+        [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+    done
+    SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/nest.yaml" ]; then
+        BASE_DIR="${SCRIPT_DIR}"
+    else
+        BASE_DIR="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+    fi
+fi
+
 WHEELHOUSE="${BASE_DIR}/wheelhouse"
 COLLECTIONS_DIR="${BASE_DIR}/collections"
 FILES_DIR="${BASE_DIR}/playbooks/files"
