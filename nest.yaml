@@ -1,76 +1,38 @@
+# =============================================================================
+# BIRDHUNT - "NEST" INVENTORY (COMPETITION TEMPLATE)
+#
+# This inventory ships empty for competition readiness.
+# To populate this inventory interactively and test connectivity, run:
+#     ./lay_egg.sh
+#
+# A populated sample reference is available in: nest.example.yaml
+# =============================================================================
+
 all:
   children:
     windows:
-      hosts:
-        viking:
-          ansible_host: 192.168.220.245
-          ansible_port: 5985
-          ansible_password: 9150fc064f4cdb5b1f552067837156c3B@LL5
-          blacklist: []
-          whitelist: []
-          user_passwords:
-            administrator: 9150fc064f4cdb5b1f552067837156c3B@LL5
-            viking: f8b82665c734a1fa4225093b166868dfB@LL5
-        kerberos:
-          ansible_host: 192.168.220.254
-          ansible_port: 5985
-          blacklist: []
-          whitelist: []
-        cthulhu:
-          ansible_host: 192.168.220.111
-          ansible_port: 5985
-          ansible_password: 285d829730a528f384876e80ca07c54aB@LL5
-          blacklist: []
-          whitelist: []
-          user_passwords:
-            administrator: 285d829730a528f384876e80ca07c54aB@LL5
-            Astrocat: 66e12eb9f5623677ca17726caec1b07eB@LL5
+      hosts: {}
       vars:
         ansible_user: administrator
-        ansible_password: LowCostLunar1@
+        ansible_password: ""
         ansible_connection: winrm
         ansible_winrm_server_cert_validation: ignore
         ansible_winrm_transport: ntlm
+        seed_val: CCDC2026SecureSeed!
+
     linux:
-      hosts:
-        brassknuckels:
-          ansible_host: 192.168.220.231
-          ansible_port: 22
-          ansible_password: 83986d841f04203490c1691d792e9f78
-          blacklist: []
-          whitelist: []
-          user_passwords:
-            root: 83986d841f04203490c1691d792e9f78
-            serveradmin: 2b4e74ef1afd1aa69a48380a78196419
-        balrog:
-          ansible_host: 192.168.220.2
-          ansible_port: 22
-          ansible_password: 483c63fbd2691507d27004afdaa4545e
-          blacklist: []
-          whitelist: []
-          user_passwords:
-            root: 483c63fbd2691507d27004afdaa4545e
-            f: 787fe5b21e99d759cd90e1ca39797282
-            alpine: 98d6f044d272120f8ff721a9aeca0136
-        donut:
-          ansible_host: 192.168.220.234
-          ansible_port: 22
-          ansible_password: 968c9b82363909b8a38586062cd7226f
-          blacklist: []
-          whitelist: []
-          user_passwords:
-            root: 968c9b82363909b8a38586062cd7226f
-            donut: 9bf54d777c79531c83450564f0e29d28
+      hosts: {}
       vars:
         ansible_user: root
-        ansible_password: LowCostLunar1@
+        ansible_password: ""
         ansible_connection: ssh
         ansible_become: true
         ansible_become_method: sudo
-        ansible_become_password: '{{ ansible_password }}'
+        ansible_become_password: "{{ ansible_password }}"
+        seed_val: CCDC2026SecureSeed!
+
     jumpbox:
       hosts:
         localhost:
           ansible_connection: local
-          ansible_python_interpreter: '{{ ansible_playbook_python }}'
-          ansible_become_password: QNCMtCMeTXToHPyd
+          ansible_python_interpreter: "{{ ansible_playbook_python }}"

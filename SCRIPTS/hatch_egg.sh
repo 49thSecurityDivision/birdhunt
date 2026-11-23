@@ -127,5 +127,32 @@ fi
 echo ""
 echo "========================================================"
 echo "[✓] HATCH COMPLETE! Environment is competition-ready."
-echo "    Run: ansible all -m ping"
 echo "========================================================"
+
+# Check if nest.yaml is empty or unpopulated
+NEST_FILE="${BASE_DIR}/nest.yaml"
+IS_EMPTY=false
+if [ ! -f "${NEST_FILE}" ] || grep -q "hosts: {}" "${NEST_FILE}" 2>/dev/null; then
+    IS_EMPTY=true
+fi
+
+if [ "$IS_EMPTY" = true ]; then
+    echo "[*] Notice: 'nest.yaml' is currently empty."
+    if [ -t 0 ] || [ -e /dev/tty ]; then
+        read -r -p "[?] Would you like to build your inventory now with './lay_egg.sh'? [Y/n]: " BUILD_INV </dev/tty || BUILD_INV="y"
+        BUILD_INV="${BUILD_INV:-y}"
+        if [[ "${BUILD_INV}" =~ ^[Yy]$ ]]; then
+            if [ -f "${BASE_DIR}/SCRIPTS/lay_egg.sh" ]; then
+                "${BASE_DIR}/SCRIPTS/lay_egg.sh"
+            elif [ -f "${BASE_DIR}/scripts/lay_egg.sh" ]; then
+                "${BASE_DIR}/scripts/lay_egg.sh"
+            fi
+        else
+            echo "    Run './lay_egg.sh' whenever you are ready to configure targets."
+        fi
+    else
+        echo "    Run './lay_egg.sh' to configure targets interactively."
+    fi
+else
+    echo "    Run: ansible all -m ping"
+fi

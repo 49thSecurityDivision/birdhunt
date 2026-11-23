@@ -66,7 +66,7 @@ Sit down at the Jumpbox terminal, open your shell, and pull down your pre-approv
 ```bash
 git clone <YOUR_COMPETITION_REPO_URL> BirdHunt
 cd BirdHunt
-chmod +x hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
+chmod +x lay_egg.sh hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
 ```
 
 ---
@@ -88,41 +88,36 @@ sudo ./hatch_egg.sh
 
 ---
 
-### Minute 0:03 – 0:05 | Populate the "Nest" (`nest.yaml`)
-White Team will hand you your team packet containing assigned IP subnets, hostnames, and initial default passwords.
+### Minute 0:03 – 0:05 | Populate the "Nest" (`./lay_egg.sh`)
+White Team will hand you your team packet containing assigned IP subnets, hostnames, and initial default passwords. The repository ships with an **empty `nest.yaml`** ready to be populated for competition day.
 
-Open **[`nest.yaml`](file:///Users/matt/Desktop/BirdHunt/nest.yaml)**:
+Launch the interactive **Lay Egg** wizard:
 ```bash
-nano nest.yaml
-# or: vim nest.yaml
+./lay_egg.sh
 ```
+*(Note: If you run `sudo ./hatch_egg.sh`, it will also automatically offer to launch `./lay_egg.sh` at the end if `nest.yaml` is empty!)*
 
-1. **Subnet Rapid Replacement**:
-   If the sample subnet is `192.168.220.x` and your assigned competition subnet is `10.10.5.x`, update it instantly:
-   ```bash
-   sed -i 's/192.168.220./10.10.5./g' nest.yaml
-   ```
-2. **Update Initial Passwords**:
-   In `nest.yaml`, verify and set the default passwords provided in the team packet:
-   - Under `windows: vars:`: update `ansible_password: "InitialWindowsPass123!"`
-   - Under `linux: vars:`: update `ansible_password: "InitialLinuxPass123!"`
-   - Under `jumpbox: hosts: localhost:`: update `ansible_become_password: "JumpboxSudoPass!"`
-3. **Whitelist Scored Accounts**:
-   Check your inject packet for scored service accounts (e.g. `serveradmin`, `scoreuser`, `httpcheck`). Add them to the host's `whitelist: ['root', 'serveradmin']` so automated rotation or cleanup does not lock out scoring checks.
+**What the wizard does**:
+1. **Global Defaults**: Prompts once for your team's default Linux password, Windows password, and rotation seed.
+2. **Target Hosts**:
+   - **Interactive Mode**: Prompts for each host's name, IP, OS (Linux/Windows), port, and whitelisted scored accounts (e.g. `serveradmin`).
+   - **Batch Paste Mode**: Allows pasting multiple lines directly from your inject packet spreadsheet!
+3. **Auto-Generates `nest.yaml`**: Writes the clean, valid Ansible inventory. (A pre-populated example is preserved in `nest.example.yaml`).
+4. **Automated Ping Test**: Immediately prompts and runs `ansible all -m ping` to verify SSH and WinRM reachability across all entered hosts in real-time.
 
 ---
 
 ### Minute 0:05 – 0:06 | The "Ping Gate" (Connection Verification)
-Verify you have working network and credential access to every box:
+If you need to re-verify network and credential access to every box at any time:
 ```bash
 ansible all -m ping
 ```
-*(If using the container: `./crack_egg.sh all -m ping`)*
 
-- **Green (`SUCCESS`)**: Machine is connected and ready.
+- **Green (`SUCCESS`)**: Machine is connected and credentials are verified.
 - **Red (`UNREACHABLE / AUTH FAILED`)**:
-  - If a specific box fails, test it individually: `ansible <hostname> -m ping -vvv`
-  - Verify IP and credentials in `nest.yaml`.
+  - Linux: Check SSH port, firewall, and verify password.
+  - Windows: Check WinRM port 5985 is open.
+  - Re-run `./lay_egg.sh` or edit `nest.yaml` to adjust IPs/credentials.
   - **COMPETITION RULE**: Do not let 1 failing host stall you. Use `--limit` to exclude stubborn hosts and keep moving forward with the rest of the fleet!
 
 ---

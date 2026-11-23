@@ -41,11 +41,13 @@ Pre-build and air-gap the immutable container so you have **zero** dependency is
 ### Option B: Bare-Metal Jumpbox Execution (100% Offline Pre-Packaged)
 Everything is pre-packaged in the repo (`wheelhouse/`, `collections/`, `playbooks/files/`). No internet needed:
 ```bash
-chmod +x hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
+chmod +x lay_egg.sh hatch_egg.sh bake_egg.sh crack_egg.sh egg_candler.sh SCRIPTS/*.sh SCRIPTS/*.py
 sudo ./hatch_egg.sh
 
-# Verify connectivity & run:
-ansible all -m ping
+# 1. Build your inventory and verify connectivity:
+./lay_egg.sh
+
+# 2. Run initial Bird Shot master playbook:
 ansible-playbook playbooks/birdshot.yml -e "seed_val=CCDC2026SecureSeed!"
 ```
 
@@ -68,7 +70,9 @@ ansible-playbook playbooks/birdshot.yml -e "seed_val=CCDC2026SecureSeed!"
 ```
 BirdHunt/
 ├── ansible.cfg                    # Hardened Ansible defaults (inventory = nest.yaml, forks = 20)
-├── nest.yaml                      # Active inventory ("Nest") with windows, linux & jumpbox
+├── nest.yaml                      # Active inventory ("Nest") - ships empty for competition
+├── nest.example.yaml              # Sample reference inventory
+├── lay_egg.sh                     # Symlink -> scripts/lay_egg.sh (Interactive inventory wizard & ping test)
 ├── hatch_egg.sh                   # Jumpbox bare-metal bootstrap script (symlink -> scripts/hatch_egg.sh)
 ├── bake_egg.sh                    # Symlink -> scripts/bake_egg.sh (Builds & exports EE container)
 ├── crack_egg.sh                   # Symlink -> scripts/crack_egg.sh (Runs playbooks inside EE container)
