@@ -11,6 +11,8 @@
   hosts: linux
   gather_facts: false
   become: true
+  ignore_unreachable: true
+  ignore_errors: true
   tasks:
     - name: Enumerate listeners and established connections
       ansible.builtin.shell: |
@@ -41,16 +43,27 @@
         print(json.dumps({"listening": listening, "connections": conns}))
         PYEOF
       register: lin_report
+      async: 20
+      poll: 2
       changed_when: false
- 
+      ignore_errors: true
+      ignore_unreachable: true
+
     - name: Store Linux node report
       ansible.builtin.set_fact:
         node_report: "{{ lin_report.stdout | from_json }}"
- 
- 
+      when:
+        - lin_report is defined
+        - lin_report.stdout is defined
+        - lin_report.stdout | length > 0
+        - not (lin_report.failed | default(false))
+
+
 - name: Collect network state from Windows hosts
   hosts: windows
   gather_facts: false
+  ignore_unreachable: true
+  ignore_errors: true
   tasks:
     - name: Enumerate listeners and established connections
       ansible.windows.win_powershell:
@@ -71,10 +84,19 @@
             }
           [pscustomobject]@{ listening = @($tcp) + @($udp); connections = @($est) }
       register: win_report
- 
+      async: 20
+      poll: 2
+      ignore_errors: true
+      ignore_unreachable: true
+
     - name: Store Windows node report
       ansible.builtin.set_fact:
         node_report: "{{ win_report.output[0] }}"
+      when:
+        - win_report is defined
+        - win_report.output is defined
+        - win_report.output | length > 0
+        - not (win_report.failed | default(false))
  
  
 - name: Render the network map on the jumpbox
@@ -270,3 +292,27 @@
     - name: Report output location
       ansible.builtin.debug:
         msg: "Network map written to {{ graph_dir }}/network-{{ ts }}.png (also .svg, .dot, .json)"
+
+    - name: Evaluate scanned vs skipped hosts
+      ansible.builtin.set_fact:
+        active_scanned: "{{ groups['all'] | select('in', hostvars) | selectattr('node_report', 'defined') | list }}"
+        skipped_or_timed_out: >-
+          {{
+            groups['all']
+            | reject('in', (groups['all'] | select('in', hostvars) | selectattr('node_report', 'defined') | list))
+            | difference(groups['jumpbox'] | default(['localhost']))
+          }}
+
+    - name: ALERT - Report Skipped or Timed-Out Hosts
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          [!] CRITICAL OPERATOR ALERT: THE FOLLOWING {{ skipped_or_timed_out | length }} HOST(S) TIMED OUT OR FAILED:
+          {% for h in skipped_or_timed_out %}
+            • {{ h }} (IP: {{ hostvars[h].ansible_host | default('unknown') }})
+          {% endfor %}
+          These hosts were skipped to keep your team's deployment moving!
+          Troubleshoot connectivity or credentials, then re-scan them individually:
+              ansible-playbook playbooks/snipe.yml --limit "{{ skipped_or_timed_out | join(',') }}"
+          =====================================================================
+      when: skipped_or_timed_out | length > 0

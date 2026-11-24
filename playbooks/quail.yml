@@ -41,7 +41,9 @@
 - name: "Phase 2A (Hardening & Verification): Linux User Security & Fact Sync"
   hosts: linux
   become: true
-  gather_facts: true
+  gather_facts: false
+  ignore_unreachable: true
+  ignore_errors: true
   tags:
     - passwords
     - users
@@ -312,3 +314,34 @@
     - name: Report rotation summary
       ansible.builtin.debug:
         msg: "Successfully audited and secured {{ rotation_dict.keys() | list | length }} user accounts on {{ inventory_hostname }}."
+
+
+# =============================================================================
+# PLAY 3: RECAP & OPERATOR ALERT FOR TIMED OUT / FAILED LINUX HOSTS
+# =============================================================================
+- name: "Phase 2A: Audit & Rotation Status Alert"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags:
+    - passwords
+    - users
+    - linux_passwords
+  tasks:
+    - name: Evaluate completed vs skipped Linux hosts
+      ansible.builtin.set_fact:
+        skipped_linux: "{{ groups['linux'] | default([]) | difference(ansible_play_hosts_all | default([])) }}"
+
+    - name: ALERT - Report Skipped or Timed-Out Linux Hosts
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          [!] CRITICAL OPERATOR ALERT: THE FOLLOWING LINUX HOST(S) TIMED OUT OR FAILED:
+          {% for h in skipped_linux %}
+            • {{ h }} (IP: {{ hostvars[h].ansible_host | default('unknown') }})
+          {% endfor %}
+          These hosts were skipped to keep your team's deployment moving!
+          Review host credentials/network in hypervisor, then retry them:
+              ansible-playbook playbooks/quail.yml --limit "{{ skipped_linux | join(',') }}"
+          =====================================================================
+      when: (skipped_linux | length) > 0

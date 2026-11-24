@@ -242,17 +242,25 @@ def load_inventory():
 
 
 # =============================================================================
-# SSH EXECUTION HELPERS
+# SSH EXECUTION HELPERS (With Per-Command Timeout)
 # =============================================================================
-def run_ssh_command(client, command, handle_buffer=None):
-    stdin, stdout, stderr = client.exec_command(command, get_pty=True)
+def run_ssh_command(client, command, handle_buffer=None, timeout=15):
+    """Execute SSH command with a strict timeout to prevent hung processes."""
+    stdin, stdout, stderr = client.exec_command(command, get_pty=True, timeout=timeout)
     buffer = b""
     channel = stdout.channel
+    channel.settimeout(timeout)
+    start_time = time.time()
+
     while not channel.exit_status_ready():
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Command execution timed out after {timeout} seconds: '{command[:40]}'")
         if channel.recv_ready():
             buffer += channel.recv(1024)
             if handle_buffer is not None:
                 buffer = handle_buffer(buffer, stdin, stdout, stderr, client)
+        time.sleep(0.05)
+
     while channel.recv_ready():
         buffer += channel.recv(1024)
     return buffer
@@ -269,8 +277,8 @@ def gen_place_sudo_password(password):
     return place_sudo_password
 
 
-def run_ssh_sudo_command(client, command, password):
-    buf = run_ssh_command(client, f"\\sudo -S -p '{SUDO_PASSWORD_PROMPT.decode()}' {command}", gen_place_sudo_password(password))
+def run_ssh_sudo_command(client, command, password, timeout=15):
+    buf = run_ssh_command(client, f"\\sudo -S -p '{SUDO_PASSWORD_PROMPT.decode()}' {command}", gen_place_sudo_password(password), timeout=timeout)
     lines = buf.split(b"\r\n")
     new_lines = list(filter(lambda a: SUDO_PASSWORD_PROMPT not in a and b"<Password Prompt>" not in a, lines))
     return b"\r\n".join(new_lines)
@@ -282,6 +290,7 @@ def run_ssh_sudo_command(client, command, password):
 def main():
     inv_path, raw_config, targets, inv_type = load_inventory()
     global_policy = raw_config.get("global_policy", {})
+    timed_out_hosts = []
 
     tty_print("")
     tty_print("=======================================================================")
@@ -306,20 +315,28 @@ def main():
         ssh.set_missing_host_key_policy(AutoAddPolicy())
 
         try:
-            ssh.connect(hostname=ip, port=port, username=login_user, password=login_pwd, timeout=10)
+            ssh.connect(hostname=ip, port=port, username=login_user, password=login_pwd, timeout=5)
         except Exception as e:
-            tty_print(f"[-] ERROR: Failed to connect to {hname} ({ip}:{port}): {e}")
-            tty_print("    Skipping host and continuing...")
+            tty_print(f"[-] ERROR / TIMEOUT connecting to {hname} ({ip}:{port}): {e}")
+            tty_print(f"    Skipping {hname} to avoid stalling deployment...")
+            timed_out_hosts.append({"host": hname, "ip": ip, "reason": f"Connection failed/timed out: {e}"})
             continue
 
         try:
-            raw_shells = run_ssh_command(ssh, "\\cat /etc/shells | \\grep -v '#'").decode(errors="ignore").split("\n")
+            raw_shells = run_ssh_command(ssh, "\\cat /etc/shells | \\grep -v '#'", timeout=10).decode(errors="ignore").split("\n")
             shells = list(map(lambda a: a.strip(), filter(lambda a: len(a) > 0, raw_shells)))
 
-            passwd_raw = base64.b64decode(run_ssh_command(ssh, "\\cat /etc/passwd | \\base64"))
-            shadow_raw = base64.b64decode(run_ssh_sudo_command(ssh, "\\cat /etc/shadow | \\base64", login_pwd))
+            passwd_raw = base64.b64decode(run_ssh_command(ssh, "\\cat /etc/passwd | \\base64", timeout=10))
+            shadow_raw = base64.b64decode(run_ssh_sudo_command(ssh, "\\cat /etc/shadow | \\base64", login_pwd, timeout=10))
         except Exception as e:
-            tty_print(f"[-] ERROR reading /etc/passwd or /etc/shadow on {hname}: {e}")
+            tty_print(f"[-] ERROR / TIMEOUT reading credentials on {hname}: {e}")
+            tty_print(f"    Skipping {hname}...")
+            timed_out_hosts.append({"host": hname, "ip": ip, "reason": f"Read timeout/error: {e}"})
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            continue
             ssh.close()
             continue
 
@@ -564,6 +581,22 @@ def main():
     with open(inv_path, "w") as f:
         yaml.dump(raw_config, f, sort_keys=False, default_flow_style=False)
     tty_print(f"[✓] Inventory {inv_path} successfully saved.")
+
+    # Alert operator if any hosts timed out or were skipped
+    if timed_out_hosts:
+        tty_print("")
+        tty_print("=======================================================================")
+        tty_print(f"[!] CRITICAL OPERATOR ALERT: {len(timed_out_hosts)} HOST(S) TIMED OUT OR FAILED:")
+        tty_print("=======================================================================")
+        for th in timed_out_hosts:
+            tty_print(f"  • {th['host']:16} (IP: {th['ip']}) - {th['reason']}")
+        tty_print("-----------------------------------------------------------------------")
+        tty_print("These hosts were skipped to keep your deployment moving.")
+        tty_print("Once you resolve their credentials or network route, re-run them with:")
+        skipped_str = ",".join(th['host'] for th in timed_out_hosts)
+        tty_print(f"    ansible-playbook playbooks/quail.yml --limit \"{skipped_str}\"")
+        tty_print("=======================================================================")
+
     tty_print("=======================================================================")
     tty_print("    EGG CANDLER AUDIT COMPLETE - READY FOR ANSIBLE PLAYBOOK STAGES    ")
     tty_print("=======================================================================")

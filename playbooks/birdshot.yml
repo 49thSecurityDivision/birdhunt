@@ -56,3 +56,25 @@
     - wazuh
     - siem
     - agents
+
+# =============================================================================
+# FINAL SUMMARY: FLEET EXECUTION RECAP & RE-RUN GUIDANCE
+# =============================================================================
+- name: "Phase 5: Bird Shot Pipeline Execution Summary"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Final Fleet Status Banner
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          BIRDHUNT "BIRD SHOT" RAPID-RESPONSE PIPELINE COMPLETE
+          =====================================================================
+          1. Check network graphs:
+             ls -lh network-maps/
+          2. Verify connectivity anytime across the fleet:
+             ansible all -m ping
+          3. If any machines timed out or failed, target them individually:
+             ansible-playbook playbooks/birdshot.yml --limit "<hostname>"
+          =====================================================================

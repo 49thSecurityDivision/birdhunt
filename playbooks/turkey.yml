@@ -10,6 +10,8 @@
 - name: Deterministic Windows Password Rotation
   hosts: windows
   gather_facts: false
+  ignore_unreachable: true
+  ignore_errors: true
   vars:
     complexity_suffix: "B@LL5"
 
@@ -81,3 +83,35 @@
       ansible.builtin.set_fact:
         ansible_password: "{{ new_admin_pass }}"
       no_log: true
+
+
+# =============================================================================
+# PLAY 2: RECAP & OPERATOR ALERT FOR TIMED OUT / FAILED WINDOWS HOSTS
+# =============================================================================
+- name: "Phase 2B: Windows Rotation Status Alert"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags:
+    - passwords
+    - users
+    - windows_passwords
+  tasks:
+    - name: Evaluate completed vs skipped Windows hosts
+      ansible.builtin.set_fact:
+        skipped_windows: "{{ groups['windows'] | default([]) | difference(ansible_play_hosts_all | default([])) }}"
+
+    - name: ALERT - Report Skipped or Timed-Out Windows Hosts
+      ansible.builtin.debug:
+        msg: |
+          =====================================================================
+          [!] CRITICAL OPERATOR ALERT: THE FOLLOWING WINDOWS HOST(S) TIMED OUT OR FAILED:
+          {% for h in skipped_windows %}
+            • {{ h }} (IP: {{ hostvars[h].ansible_host | default('unknown') }})
+          {% endfor %}
+          These hosts were skipped to keep your team's deployment moving!
+          Common fixes: Check WinRM port 5985 is open, or check Administrator password.
+          Retry them once fixed:
+              ansible-playbook playbooks/turkey.yml --limit "{{ skipped_windows | join(',') }}"
+          =====================================================================
+      when: (skipped_windows | length) > 0
